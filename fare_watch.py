@@ -25,9 +25,18 @@ import json
 import time
 import argparse
 from datetime import date, datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import requests
 from bs4 import BeautifulSoup
+
+# Cloudflare, veri-merkezi IP'lerine (GitHub Actions) duz requests ile 403 doner.
+# curl_cffi Chrome'un TLS parmak izini taklit ederek bunu asar; yoksa requests'e duser.
+try:
+    from curl_cffi import requests as httpx
+    _IMPERSONATE = "chrome"
+except ImportError:
+    import requests as httpx
+    _IMPERSONATE = None
 
 # ============================================================
 # AYARLAR
@@ -35,8 +44,8 @@ ORIGIN      = "ASB"                 # Asgabat
 DEST        = "IST"                 # Istanbul
 DATE_START  = date(2026, 8, 1)      # izleme penceresi baslangici (gecmis gunler atlanir)
 DATE_END    = date(2026, 10, 31)    # izleme penceresi sonu
-REQUEST_DELAY = 0.6                 # tarihler arasi nazik bekleme (sn)
-REQUEST_TIMEOUT = 25                # her istek zaman asimi (sn)
+MAX_WORKERS = 6                     # es zamanli istek sayisi (paralel tarama)
+REQUEST_TIMEOUT = 20                # her istek zaman asimi (sn)
 FETCH_RETRIES = 3                   # basarisiz istekte tekrar sayisi
 # Telegram bilgileri ORTAM DEGISKENINDEN gelir (kodda tutma!)
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "").strip()
@@ -148,25 +157,44 @@ def parse_fares(html: str):
     return result
 
 
-def fetch_date(session: requests.Session, d: date):
+def http_get(url):
+    if _IMPERSONATE:
+        return httpx.get(url, impersonate=_IMPERSONATE, timeout=REQUEST_TIMEOUT)
+    return httpx.get(url, timeout=REQUEST_TIMEOUT, headers={
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    })
+
+
+def http_post(url, data):
+    if _IMPERSONATE:
+        return httpx.post(url, data=data, impersonate=_IMPERSONATE, timeout=20)
+    return httpx.post(url, data=data, timeout=20)
+
+
+def fetch_date(d: date):
     """
     Donus: ('ok', fares_dict) | ('empty', {}) | ('fail', None)
     'fail' = ag/HTTP hatasi ya da beklenmeyen sayfa -> state DEGISTIRILMEZ.
+    Thread-guvenli (her cagri kendi istegini yapar).
     """
     url = search_url(d)
     for attempt in range(1, FETCH_RETRIES + 1):
         try:
-            r = session.get(url, timeout=REQUEST_TIMEOUT)
+            r = http_get(url)
             if r.status_code != 200:
-                log(f"  [{d}] HTTP {r.status_code} (deneme {attempt}/{FETCH_RETRIES})")
-                time.sleep(2)
+                if attempt == FETCH_RETRIES:
+                    log(f"  [{d}] HTTP {r.status_code} (son deneme)")
+                time.sleep(1.5)
                 continue
             html = r.text
             low = _strip_tr(html.lower())   # TR karakterleri normalize (i/ı, ç/c ...)
             valid_page = ("siralama" in low) or ("toplam" in low and "sonuc" in low)
             if not valid_page:
-                log(f"  [{d}] Beklenmeyen sayfa (yonlendirme/engelleme?) (deneme {attempt}/{FETCH_RETRIES})")
-                time.sleep(2)
+                if attempt == FETCH_RETRIES:
+                    log(f"  [{d}] Beklenmeyen sayfa (yonlendirme/engelleme?)")
+                time.sleep(1.5)
                 continue
             fares = parse_fares(html)
             if fares:
@@ -174,8 +202,9 @@ def fetch_date(session: requests.Session, d: date):
             # Gecerli sayfa ama fare yok -> gercekten bos
             return "empty", {}
         except Exception as e:
-            log(f"  [{d}] fetch hata: {e} (deneme {attempt}/{FETCH_RETRIES})")
-            time.sleep(2)
+            if attempt == FETCH_RETRIES:
+                log(f"  [{d}] fetch hata: {e}")
+            time.sleep(1.5)
     return "fail", None
 
 
@@ -218,11 +247,10 @@ def tg_send(text: str, dry=False):
     ok = True
     for chunk in _chunks(text, 3500):
         try:
-            r = requests.post(
+            r = http_post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                data={"chat_id": TELEGRAM_CHAT_ID, "text": chunk,
-                      "disable_web_page_preview": "true"},
-                timeout=20,
+                {"chat_id": TELEGRAM_CHAT_ID, "text": chunk,
+                 "disable_web_page_preview": "true"},
             )
             if r.status_code != 200:
                 log(f"Telegram hata HTTP {r.status_code}: {r.text[:200]}")
@@ -270,9 +298,6 @@ def fare_satiri(flight, cabin, info):
 
 def run_once(dry=False, limit=None, only_date=None):
     st = load_state()
-    session = requests.Session()
-    session.headers.update({"User-Agent": USER_AGENT,
-                            "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8"})
 
     dates = monitored_dates()
     if only_date:
@@ -290,13 +315,26 @@ def run_once(dry=False, limit=None, only_date=None):
     have_any_dates = 0
     cheapest = {"Ekonomi": None, "Business": None}  # (price, date, flight) ozet icin
 
+    # --- Tarihleri paralel cek (curl_cffi impersonate) ---
+    engine = "curl_cffi" if _IMPERSONATE else "requests"
+    log(f"{len(dates)} tarih {MAX_WORKERS} paralel istekle taraniyor ({engine})...")
+    results = {}
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        futs = {ex.submit(fetch_date, d): d for d in dates}
+        for fu in as_completed(futs):
+            dd = futs[fu]
+            try:
+                results[dd] = fu.result()
+            except Exception as e:
+                results[dd] = ("fail", None)
+                log(f"[{dd}] thread hata: {e}")
+
     for d in dates:
         diso = d.isoformat()
-        status, fares = fetch_date(session, d)
+        status, fares = results.get(d, ("fail", None))
 
         if status == "fail":
             log(f"[{diso}] atlandi (fetch fail) - state korunuyor")
-            time.sleep(REQUEST_DELAY)
             continue
 
         scanned_ok += 1
@@ -336,7 +374,6 @@ def run_once(dry=False, limit=None, only_date=None):
 
         log(f"[{diso}] {gun_etiketi(d).split()[1]:9} -> {len(fares)} tarife" +
             ("" if fares else " (bos)"))
-        time.sleep(REQUEST_DELAY)
 
     log(f"Tarama bitti: {scanned_ok}/{len(dates)} tarih basarili, {have_any_dates} tarihte bilet var.")
 
