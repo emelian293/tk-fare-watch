@@ -7,6 +7,10 @@ compatibility_date = "2024-11-01"
 binding = "ACCESS"
 id = "59f99aa5c20b4a178d9a1ed72b80de34"
 
+# Guvenilir zamanlama: her 5 dakikada GitHub taramasini tetikle
+[triggers]
+crons = ["*/5 * * * *"]
+
 # Gizli olmayan degiskenler burada durabilir (istege bagli).
 # DATA_URL varsayilani kod icinde; degistirmek istersen ac:
 # [vars]

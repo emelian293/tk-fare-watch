@@ -41,7 +41,35 @@ export default {
     }
     return new Response("ok");
   },
+
+  // Cloudflare Cron (guvenilir): GitHub tarama workflow'unu tetikler
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(triggerScan(env));
+  },
 };
+
+async function triggerScan(env) {
+  if (!env.GH_TOKEN) return; // token yoksa sessizce gec
+  const owner = env.GH_OWNER || "emelian293";
+  const repo = env.GH_REPO || "tk-fare-watch";
+  const wf = env.GH_WORKFLOW || "watch.yml";
+  const r = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${wf}/dispatches`,
+    {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${env.GH_TOKEN}`,
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "tk-fare-bot",
+      },
+      // report=false -> otomatik tarama tam liste GONDERMEZ (sadece yeni bilet/fiyat + gunluk ozet)
+      body: JSON.stringify({ ref: "main", inputs: { report: "false" } }),
+    }
+  );
+  if (!r.ok && env.OWNER_CHAT_ID)
+    await send(env, env.OWNER_CHAT_ID, `⚠️ Tarama tetiklenemedi (GitHub ${r.status}).`);
+}
 
 async function route(env, msg) {
   const chatId = String(msg.chat.id);
@@ -49,14 +77,16 @@ async function route(env, msg) {
   const lower = text.toLowerCase();
   const isOwner = env.OWNER_CHAT_ID && chatId === String(env.OWNER_CHAT_ID);
 
-  // --- Sahip: erisim yonetimi komutlari ---
+  // --- Sahip: erisim yonetimi komutlari ("/" opsiyonel, TR harf toleransli) ---
   if (isOwner) {
-    let m;
-    if ((m = lower.match(/^\/izinver\s+(-?\d+)(?:\s+([\s\S]+))?$/)))
-      return cmdAllow(env, chatId, m[1], (m[2] || "").trim());
-    if ((m = lower.match(/^\/izinal\s+(-?\d+)/)))
-      return cmdRevoke(env, chatId, m[1]);
-    if (lower === "/kullanicilar" || lower === "/liste")
+    const parts = text.replace(/^\//, "").trim().split(/\s+/);
+    const cmd = trNorm(parts[0].toLowerCase());
+    const id = parts[1];
+    if (cmd === "izinver" && id && /^-?\d+$/.test(id))
+      return cmdAllow(env, chatId, id, parts.slice(2).join(" "));
+    if (cmd === "izinal" && id && /^-?\d+$/.test(id))
+      return cmdRevoke(env, chatId, id);
+    if (["kullanicilar", "kullanici", "liste", "users"].includes(cmd))
       return cmdList(env, chatId);
   }
 
@@ -190,6 +220,11 @@ function row(a, b, c, d, e, f) {
 
 function esc(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function trNorm(s) {   // Turkce harfleri ASCII'ye (komut eslesmesi icin)
+  return String(s).replace(/ı/g, "i").replace(/İ/g, "i").replace(/ş/g, "s")
+    .replace(/ç/g, "c").replace(/ğ/g, "g").replace(/ö/g, "o").replace(/ü/g, "u");
 }
 
 async function fetchData(env) {
