@@ -55,8 +55,9 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 # ============================================================
 
 BASE = "https://turkmenistanairlinestr.com"
-STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
-LOG_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.log")
+STATE_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
+LATEST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "latest.json")
+LOG_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.log")
 USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
@@ -64,6 +65,14 @@ GUN_ADI  = ["Pazartesi", "Sali", "Carsamba", "Persembe", "Cuma", "Cumartesi", "P
 GUN_KISA = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"]   # Cuma/Cumartesi ayrimi
 AY_ADI   = ["", "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
             "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"]
+# Monospace tablo icin ASCII (diakritik hizayi bozmasin)
+GUN_TBL  = ["Pzt", "Sal", "Car", "Per", "Cum", "Cmt", "Paz"]
+AY_KISA  = ["", "Oca", "Sub", "Mar", "Nis", "May", "Haz",
+            "Tem", "Agu", "Eyl", "Eki", "Kas", "Ara"]
+# Ay adi -> ay no (bot sorgusu icin; TR + bazi ASCII varyantlar)
+AY_NO = {"ocak":1,"subat":2,"şubat":2,"mart":3,"nisan":4,"mayis":5,"mayıs":5,
+         "haziran":6,"temmuz":7,"agustos":8,"ağustos":8,"eylul":9,"eylül":9,
+         "ekim":10,"kasim":11,"kasım":11,"aralik":12,"aralık":12}
 
 
 # --- Yardimcilar -------------------------------------------------------------
@@ -245,18 +254,19 @@ def save_state(st):
 
 # --- Telegram ----------------------------------------------------------------
 
-def tg_send(text: str, dry=False):
+def tg_send(text: str, dry=False, parse_mode=None):
     if dry or not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         log("TELEGRAM (gonderilmedi/dry):\n" + text)
         return True
     ok = True
-    for chunk in _chunks(text, 3500):
+    for chunk in _chunks(text, 4000):
+        data = {"chat_id": TELEGRAM_CHAT_ID, "text": chunk,
+                "disable_web_page_preview": "true"}
+        if parse_mode:
+            data["parse_mode"] = parse_mode
         try:
             r = http_post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                {"chat_id": TELEGRAM_CHAT_ID, "text": chunk,
-                 "disable_web_page_preview": "true"},
-            )
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", data)
             if r.status_code != 200:
                 log(f"Telegram hata HTTP {r.status_code}: {r.text[:200]}")
                 ok = False
@@ -382,14 +392,16 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
 
     log(f"Tarama bitti: {scanned_ok}/{len(dates)} tarih basarili, {have_any_dates} tarihte bilet var.")
 
+    # --- Worker'in okuyacagi guncel veri ---
+    if not dry:
+        write_latest(results)
+
     # --- Bildirimler ---
     today = date.today().isoformat()
     if baseline:
-        title = ("✅ TK Fare-Watch başladı — ASB→İstanbul\n"
-                 f"İzleme: {max(date.today(), DATE_START).strftime('%d.%m.%Y')}–"
-                 f"{DATE_END.strftime('%d.%m.%Y')} · her 10 dk kontrol\n"
-                 "Bundan sonra: 🟢 yeni bilet, 🔻 fiyat düşüşü ve günde 1 tam liste.")
-        tg_send(full_report_message(results, title, cheapest), dry=dry)
+        title = "✅ TK Fare-Watch başladı — mevcut biletler (ASB→İstanbul)"
+        for pm, m in full_report_messages(results, title, cheapest):
+            tg_send(m, dry=dry, parse_mode=pm)
         st["started"] = True
         st["last_summary_date"] = today
     else:
@@ -399,17 +411,20 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
             tg_send(_price_drop_message(price_drop), dry=dry)
         if not new_avail and not price_drop:
             log("Degisiklik yok, anlik bildirim yok.")
-        # Tam liste: elle istendiginde (force_report) her zaman, yoksa gunde 1 kez
-        if force_report or (scanned_ok and st.get("last_summary_date") != today):
-            title = ("📋 ASB→İstanbul — mevcut biletler (anlık istek)" if force_report
-                     else "📋 Günlük liste — ASB→İstanbul mevcut biletler")
-            tg_send(full_report_message(results, title, cheapest), dry=dry)
+
+        if force_report:
+            # Elle istenen tam liste (ay ay tablo)
+            for pm, m in full_report_messages(results, "📋 Mevcut biletler (ASB→İstanbul)", cheapest):
+                tg_send(m, dry=dry, parse_mode=pm)
+        elif scanned_ok and st.get("last_summary_date") != today:
+            # Gunde 1 kez kisa ozet (tam liste botta 'ay' yazarak alinir)
+            tg_send(daily_brief_message(results, cheapest), dry=dry, parse_mode="HTML")
             st["last_summary_date"] = today
 
     if not dry:
         save_state(st)
     else:
-        log("--dry-run: state.json yazilmadi.")
+        log("--dry-run: state.json ve latest.json yazilmadi.")
 
 
 def _cheapest_line(cheapest):
@@ -446,44 +461,88 @@ def _price_drop_message(price_drop):
     return "\n".join(out)
 
 
-def full_report_message(results, title, cheapest):
-    """
-    Mevcut TUM musait tarihleri tek satir/gun olarak, ucus·saat·sinif·fiyat·koltuk ile listeler.
-    results: {date: (status, fares)}   fares: {'T5xxx|Cabin': {price,dep,arr,seats}}
-    """
-    dates = sorted(d for d, (s, f) in results.items() if s == "ok" and f)
-    out = [title, f"🎫 {len(dates)} tarihte bilet var · fiyatlar tek yön / USD"]
-    out.append(_cheapest_line(cheapest))
-    out.append('ℹ️ "[N koltuk]" = kalan az yer · listede olmayan günde bilet yok')
+def _esc(s):
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    cur_month = None
+
+def _tbl_row(c1, c2, c3, c4, c5, c6):
+    return f"{c1:<6} {c2:<3} {c3:<5} {c4:<2} {c5:>6} {c6:>3}"
+
+
+def _month_table(dates, results):
+    """Bir ay icin hizali monospace tablo (basliksiz govde)."""
+    lines = [_tbl_row("Tarih", "Gun", "Saat", "Sf", "Fiyat", "Klt")]
     for d in dates:
-        _, fares = results[d]
-        if d.month != cur_month:
-            cur_month = d.month
-            out.append(f"\n── {AY_ADI[d.month]} {d.year} ──")
-
-        byflight = {}
+        fares = results[d][1]
+        rows = []
         for key, info in fares.items():
+            _fl, cab = key.split("|")
+            rows.append((info.get("dep") or "--:--",
+                         "E" if cab == "Ekonomi" else "B",
+                         info["price"], info.get("seats")))
+        rows.sort(key=lambda r: (r[0], r[1]))
+        ds, gn = f"{d.day:02d} {AY_KISA[d.month]}", GUN_TBL[d.weekday()]
+        for t, c, p, s in rows:
+            lines.append(_tbl_row(ds, gn, t, c, f"{p:.0f}$", str(s) if s else "-"))
+    return "\n".join(lines)
+
+
+def full_report_messages(results, title, cheapest):
+    """
+    Mevcut tum musait tarihleri AY AY, hizali tablo halinde doner.
+    Donus: [(parse_mode, text), ...]  (her ay ayri mesaj -> Telegram sinirina takilmaz)
+    """
+    ok_dates = sorted(d for d, (s, f) in results.items() if s == "ok" and f)
+    header = (f"<b>{_esc(title)}</b>\n"
+              f"🎫 {len(ok_dates)} tarihte bilet · tek yön / USD\n"
+              f"🟢 E=Ekonomi · 🔴 B=Business · Klt=son N koltuk\n"
+              + _esc(_cheapest_line(cheapest)))
+    msgs = [("HTML", header)]
+    cur = []
+    cur_m = None
+    for d in ok_dates:
+        if cur_m is not None and (d.year, d.month) != cur_m:
+            msgs.append(_month_msg(cur, results))
+            cur = []
+        cur_m = (d.year, d.month)
+        cur.append(d)
+    if cur:
+        msgs.append(_month_msg(cur, results))
+    return msgs
+
+
+def _month_msg(dates, results):
+    d0 = dates[0]
+    label = f"{AY_ADI[d0.month]} {d0.year}"
+    return ("HTML", f"<b>{label}</b>\n<pre>{_esc(_month_table(dates, results))}</pre>")
+
+
+def daily_brief_message(results, cheapest):
+    ok = sum(1 for d, (s, f) in results.items() if s == "ok" and f)
+    return ("📊 <b>Günlük durum — ASB→İstanbul</b>\n"
+            f"🎫 {ok} tarihte bilet var · tek yön / USD\n"
+            + _esc(_cheapest_line(cheapest)) +
+            "\n\nDetay için bota ay adı yaz (ör. <b>eylül</b>) ya da <b>tümü</b>.")
+
+
+def write_latest(results):
+    """Worker'in okuyacagi tam veri (saat/sinif/fiyat/koltuk) -> latest.json."""
+    board = {}
+    for d, (s, f) in results.items():
+        if s != "ok" or not f:
+            continue
+        arr = []
+        for key, info in f.items():
             fl, cab = key.split("|")
-            byflight.setdefault(fl, {"dep": info.get("dep"), "cabs": {}})
-            byflight[fl]["cabs"][cab] = info
-
-        segs = []
-        for fl in sorted(byflight, key=lambda f: byflight[f]["dep"] or "99:99"):
-            dep = byflight[fl]["dep"] or "--:--"
-            cparts = []
-            for cab in ("Ekonomi", "Business"):
-                info = byflight[fl]["cabs"].get(cab)
-                if info:
-                    short = "Eko" if cab == "Ekonomi" else "Biz"
-                    seat = f" [{info['seats']} koltuk]" if info.get("seats") else ""
-                    cparts.append(f"{short} {info['price']:.0f}${seat}")
-            segs.append(f"{dep} {fl} " + " ".join(cparts))
-        out.append(f"{d.strftime('%d')} {GUN_KISA[d.weekday()]}: " + " | ".join(segs))
-
-    out.append(f"\n🔗 Rezervasyon: {BASE}")
-    return "\n".join(out)
+            arr.append({"t": info.get("dep"), "c": "E" if cab == "Ekonomi" else "B",
+                        "p": info["price"], "s": info.get("seats"), "fl": fl})
+        arr.sort(key=lambda x: (x["t"] or "", x["c"]))
+        board[d.isoformat()] = arr
+    data = {"updated": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+            "range": f"{max(date.today(), DATE_START).isoformat()}..{DATE_END.isoformat()}",
+            "dates": board}
+    with open(LATEST_FILE, "w", encoding="utf-8") as fp:
+        json.dump(data, fp, ensure_ascii=False, indent=1, sort_keys=True)
 
 
 # --- CLI ---------------------------------------------------------------------
