@@ -1,0 +1,13 @@
+name = "tk-fare-bot"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# Gizli olmayan degiskenler burada durabilir (istege bagli).
+# DATA_URL varsayilani kod icinde; degistirmek istersen ac:
+# [vars]
+# DATA_URL = "https://raw.githubusercontent.com/emelian293/tk-fare-watch/main/latest.json"
+#
+# Gizli degerler koda/toml'a YAZILMAZ; komutla eklenir:
+#   wrangler secret put BOT_TOKEN
+#   wrangler secret put OWNER_CHAT_ID
+#   wrangler secret put WEBHOOK_SECRET
