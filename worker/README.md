@@ -44,6 +44,25 @@ npx wrangler secret put WEBHOOK_SECRET   # rastgele metin
 
 ---
 
+## Paylaşım ve erişim izni
+
+Bot varsayılan olarak **özeldir**: sadece `OWNER_CHAT_ID` (sen) ve izin verdiğin kişiler kullanabilir.
+İzinli liste Cloudflare **KV** (`ACCESS` binding) içinde tutulur; yönetimi tamamen **Telegram'dan** yaparsın.
+
+**Paylaşmak için:** kişiye botun kullanıcı adını (`@BotAdi`) ver. Kişi bota yazınca:
+- Bot ona **kendi ID'sini** gösterir,
+- **sana** "🔔 Erişim isteği … ID: 123456" bildirimi düşer.
+
+**Yönetici komutları (sadece sen):**
+| Komut | İş |
+|-------|-----|
+| `/izinver <id> [ad]` | Kişiye erişim ver (bildirimdeki hazır komutu kullanabilirsin) |
+| `/izinal <id>` | Erişimi kaldır |
+| `/kullanicilar` | İzinli kullanıcı listesi |
+
+> Sen (`OWNER_CHAT_ID`) her zaman yetkilisin. Herkese açmak istersen `OWNER_CHAT_ID`'yi silip
+> erişim kontrolünü kaldırabilirsin (önerilmez).
+
 ## Değişkenler
 | Ad | Zorunlu | Açıklama |
 |----|:---:|----|

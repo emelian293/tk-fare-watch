@@ -2,6 +2,11 @@ name = "tk-fare-bot"
 main = "src/index.js"
 compatibility_date = "2024-11-01"
 
+# Izinli kullanici listesi burada saklanir
+[[kv_namespaces]]
+binding = "ACCESS"
+id = "59f99aa5c20b4a178d9a1ed72b80de34"
+
 # Gizli olmayan degiskenler burada durabilir (istege bagli).
 # DATA_URL varsayilani kod icinde; degistirmek istersen ac:
 # [vars]
