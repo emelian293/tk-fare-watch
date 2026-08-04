@@ -7,7 +7,14 @@ Turkmenistan Airlines resmî Türkiye acentesi **turkmenistanairlinestr.com** ü
 **Bildirim durumları**
 - 🟢 **Yeni bilet** — kapalı (0 sonuç) bir tarih satışa açıldığında ya da yeni uçuş/sınıf çıktığında
 - 🔻 **Fiyat düştü** — izlenen bir (tarih · uçuş · sınıf) fiyatı öncekine göre ucuzladığında
-- 📊 **Günlük özet** — günde 1 kez "çalışıyorum + en ucuz ekonomi/business" bilgisi
+- 📋 **Tam liste** — günde 1 kez (ve istediğin an) mevcut **tüm** müsait tarihler: her gün için uçuş · saat · sınıf · fiyat · **koltuk sayısı**
+
+### Tam listeyi istediğin an almak
+GitHub → **Actions** → `tk-fare-watch` → **Run workflow** → "report" kutusu işaretliyken çalıştır. Ya da terminalden:
+```bash
+gh workflow run watch.yml -R emelian293/tk-fare-watch -f report=true
+```
+Birkaç saniye içinde Telegram'a güncel tam liste düşer.
 
 Çalışma: **GitHub Actions** ile her **10 dakikada** bir (bulutta, ücretsiz). Bilgisayarın açık olması gerekmez.
 

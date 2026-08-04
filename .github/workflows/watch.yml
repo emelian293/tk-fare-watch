@@ -3,7 +3,12 @@ name: tk-fare-watch
 on:
   schedule:
     - cron: "*/10 * * * *"   # her 10 dakikada (GitHub cron "en iyi caba"; ara sira sarkabilir)
-  workflow_dispatch: {}       # Actions sekmesinden manuel calistirma
+  workflow_dispatch:          # Actions sekmesinden manuel calistirma
+    inputs:
+      report:
+        description: "Mevcut tum biletlerin tam listesini hemen Telegram'a gonder"
+        type: boolean
+        default: true
 
 permissions:
   contents: write             # state.json'u repoya geri commit'lemek icin
@@ -29,7 +34,7 @@ jobs:
         env:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python fare_watch.py
+        run: python fare_watch.py ${{ github.event.inputs.report == 'true' && '--report' || '' }}
 
       - name: Durumu kaydet (state.json)
         run: |

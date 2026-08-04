@@ -8,10 +8,12 @@ ekonomi/business tarife izleyici + Telegram bildirim.
 Tetikleyiciler:
   * YENI BILET  : kapali (0 sonuc) bir tarih satisa acilinca ya da yeni ucus/sinif cikinca
   * FIYAT DUSTU : izlenen bir (tarih, ucus, sinif) fiyati oncekine gore ucuzlayinca
-Ayrica gunde 1 kez ozet mesaji.
+Ayrica: gunde 1 kez (ve --report ile elle istenince) TUM musait tarihlerin
+tam listesi (ucus·saat·sinif·fiyat·koltuk sayisi).
 
 Kullanim:
   python fare_watch.py                # tek tur tarama (Actions bunu calistirir)
+  python fare_watch.py --report       # bu calismada tam listeyi gonder
   python fare_watch.py --dry-run      # Telegram gonderme + state yazma yok (parse testi)
   python fare_watch.py --test-alert   # Telegram'a ornek mesaj at ve cik
   python fare_watch.py --limit 5      # sadece ilk 5 tarih (hizli test)
@@ -58,7 +60,10 @@ LOG_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.log")
 USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-GUN_ADI = ["Pazartesi", "Sali", "Carsamba", "Persembe", "Cuma", "Cumartesi", "Pazar"]
+GUN_ADI  = ["Pazartesi", "Sali", "Carsamba", "Persembe", "Cuma", "Cumartesi", "Pazar"]
+GUN_KISA = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"]   # Cuma/Cumartesi ayrimi
+AY_ADI   = ["", "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
+            "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"]
 
 
 # --- Yardimcilar -------------------------------------------------------------
@@ -296,7 +301,7 @@ def fare_satiri(flight, cabin, info):
 
 # --- Ana akis ----------------------------------------------------------------
 
-def run_once(dry=False, limit=None, only_date=None):
+def run_once(dry=False, limit=None, only_date=None, force_report=False):
     st = load_state()
 
     dates = monitored_dates()
@@ -378,22 +383,27 @@ def run_once(dry=False, limit=None, only_date=None):
     log(f"Tarama bitti: {scanned_ok}/{len(dates)} tarih basarili, {have_any_dates} tarihte bilet var.")
 
     # --- Bildirimler ---
+    today = date.today().isoformat()
     if baseline:
-        msg = _baseline_message(scanned_ok, have_any_dates, cheapest)
-        tg_send(msg, dry=dry)
+        title = ("✅ TK Fare-Watch başladı — ASB→İstanbul\n"
+                 f"İzleme: {max(date.today(), DATE_START).strftime('%d.%m.%Y')}–"
+                 f"{DATE_END.strftime('%d.%m.%Y')} · her 10 dk kontrol\n"
+                 "Bundan sonra: 🟢 yeni bilet, 🔻 fiyat düşüşü ve günde 1 tam liste.")
+        tg_send(full_report_message(results, title, cheapest), dry=dry)
         st["started"] = True
-        st["last_summary_date"] = date.today().isoformat()
+        st["last_summary_date"] = today
     else:
         if new_avail:
             tg_send(_new_avail_message(new_avail), dry=dry)
         if price_drop:
             tg_send(_price_drop_message(price_drop), dry=dry)
         if not new_avail and not price_drop:
-            log("Degisiklik yok, bildirim gonderilmedi.")
-        # gunluk ozet
-        today = date.today().isoformat()
-        if scanned_ok and st.get("last_summary_date") != today:
-            tg_send(_summary_message(scanned_ok, have_any_dates, cheapest), dry=dry)
+            log("Degisiklik yok, anlik bildirim yok.")
+        # Tam liste: elle istendiginde (force_report) her zaman, yoksa gunde 1 kez
+        if force_report or (scanned_ok and st.get("last_summary_date") != today):
+            title = ("📋 ASB→İstanbul — mevcut biletler (anlık istek)" if force_report
+                     else "📋 Günlük liste — ASB→İstanbul mevcut biletler")
+            tg_send(full_report_message(results, title, cheapest), dry=dry)
             st["last_summary_date"] = today
 
     if not dry:
@@ -410,15 +420,6 @@ def _cheapest_line(cheapest):
             price, d, fl = c
             lines.append(f"  En ucuz {cab}: {price:.0f}$  ({gun_etiketi(d)}, {fl})")
     return "\n".join(lines) if lines else "  (su an satista bilet yok)"
-
-
-def _baseline_message(scanned, have_any, cheapest):
-    return ("✅ TK Fare-Watch baslatildi (ASB->IST)\n"
-            f"Izleme araligi: {max(date.today(), DATE_START).strftime('%d.%m.%Y')} - "
-            f"{DATE_END.strftime('%d.%m.%Y')}\n"
-            f"Tarandi: {scanned} tarih · Bilet olan: {have_any} tarih\n"
-            + _cheapest_line(cheapest) +
-            "\nBundan sonra sadece yeni bilet ve fiyat dususlerinde haber verecegim.")
 
 
 def _new_avail_message(new_avail):
@@ -445,10 +446,44 @@ def _price_drop_message(price_drop):
     return "\n".join(out)
 
 
-def _summary_message(scanned, have_any, cheapest):
-    return ("📊 Gunluk ozet (ASB->IST)\n"
-            f"Tarandi: {scanned} tarih · Bilet olan: {have_any} tarih\n"
-            + _cheapest_line(cheapest))
+def full_report_message(results, title, cheapest):
+    """
+    Mevcut TUM musait tarihleri tek satir/gun olarak, ucus·saat·sinif·fiyat·koltuk ile listeler.
+    results: {date: (status, fares)}   fares: {'T5xxx|Cabin': {price,dep,arr,seats}}
+    """
+    dates = sorted(d for d, (s, f) in results.items() if s == "ok" and f)
+    out = [title, f"🎫 {len(dates)} tarihte bilet var · fiyatlar tek yön / USD"]
+    out.append(_cheapest_line(cheapest))
+    out.append('ℹ️ "[N koltuk]" = kalan az yer · listede olmayan günde bilet yok')
+
+    cur_month = None
+    for d in dates:
+        _, fares = results[d]
+        if d.month != cur_month:
+            cur_month = d.month
+            out.append(f"\n── {AY_ADI[d.month]} {d.year} ──")
+
+        byflight = {}
+        for key, info in fares.items():
+            fl, cab = key.split("|")
+            byflight.setdefault(fl, {"dep": info.get("dep"), "cabs": {}})
+            byflight[fl]["cabs"][cab] = info
+
+        segs = []
+        for fl in sorted(byflight, key=lambda f: byflight[f]["dep"] or "99:99"):
+            dep = byflight[fl]["dep"] or "--:--"
+            cparts = []
+            for cab in ("Ekonomi", "Business"):
+                info = byflight[fl]["cabs"].get(cab)
+                if info:
+                    short = "Eko" if cab == "Ekonomi" else "Biz"
+                    seat = f" [{info['seats']} koltuk]" if info.get("seats") else ""
+                    cparts.append(f"{short} {info['price']:.0f}${seat}")
+            segs.append(f"{dep} {fl} " + " ".join(cparts))
+        out.append(f"{d.strftime('%d')} {GUN_KISA[d.weekday()]}: " + " | ".join(segs))
+
+    out.append(f"\n🔗 Rezervasyon: {BASE}")
+    return "\n".join(out)
 
 
 # --- CLI ---------------------------------------------------------------------
@@ -459,6 +494,8 @@ def main():
     ap.add_argument("--test-alert", action="store_true", help="Telegram'a ornek mesaj at ve cik")
     ap.add_argument("--limit", type=int, default=None, help="Sadece ilk N tarih")
     ap.add_argument("--date", type=str, default=None, help="Tek tarih debug (GG.AA.YYYY)")
+    ap.add_argument("--report", action="store_true",
+                    help="Bu calismada mevcut tum biletlerin tam listesini gonder")
     args = ap.parse_args()
 
     if args.test_alert:
@@ -472,7 +509,7 @@ def main():
 
     log("=" * 55)
     log("TK Fare-Watch calisiyor")
-    run_once(dry=args.dry_run, limit=args.limit, only_date=only)
+    run_once(dry=args.dry_run, limit=args.limit, only_date=only, force_report=args.report)
     log("Bitti.")
     log("=" * 55)
 
