@@ -5,3 +5,5 @@ run.log
 .DS_Store
 .venv/
 venv/
+.wrangler/
+node_modules/
