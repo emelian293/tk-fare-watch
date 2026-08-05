@@ -52,6 +52,13 @@ FETCH_RETRIES = 3                   # basarisiz istekte tekrar sayisi
 # Telegram bilgileri ORTAM DEGISKENINDEN gelir (kodda tutma!)
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+# Bildirim ayarlari (Telegram'dan /ayarlar ile yonetilir) Worker'dan okunur:
+NOTIFY_CONFIG_URL = os.environ.get(
+    "NOTIFY_CONFIG_URL", "https://tk-fare-bot.emelian293.workers.dev/config")
+DEFAULT_NOTIFY = {
+    "new_ticket": {"Ekonomi": True, "Premium": True, "Business_months": [8]},
+    "price_drop": {"Ekonomi": True, "Business": True, "Premium": True},
+}
 # ============================================================
 
 BASE = "https://turkmenistanairlinestr.com"
@@ -118,6 +125,34 @@ def monitored_dates():
 
 # --- Cekme & ayristirma ------------------------------------------------------
 
+def normalize_cabin(s):
+    """Ham sinif etiketini standartlastir: Premium / Business / Ekonomi / (bilinmeyen)."""
+    low = s.lower()
+    if "premium" in low:
+        return "Premium"
+    if "business" in low:
+        return "Business"
+    if "econom" in low or "ekonom" in low:
+        return "Ekonomi"
+    return s.strip().title()
+
+
+def detect_cabin(text):
+    """Sinif etiketini genel olarak yakalar (Premium dahil). Bulamazsa None."""
+    m = re.search(r"\d+\s*KG\s+([A-Za-zÇĞİÖŞÜçğıöşü ]{2,25}?)\s+(?:\d+\s*Koltuk|[\d.]+,\d{2})", text)
+    raw = m.group(1) if m else None
+    if not raw:
+        m2 = re.search(r"\b(Business|Ekonomi|Economy|Premium)\b", text)
+        if not m2:
+            return None
+        raw = m2.group(1)
+    return normalize_cabin(raw)
+
+
+def cabin_letter(cabin):
+    return {"Ekonomi": "E", "Business": "B", "Premium": "P"}.get(cabin, (cabin[:1].upper() or "?"))
+
+
 def parse_fares(html: str):
     """
     Sonuc sayfasindan (tarih, ucus, sinif) -> en dusuk fiyat cikarir.
@@ -133,10 +168,9 @@ def parse_fares(html: str):
             continue
         flight = m.group(0)
 
-        cm = re.search(r"\b(Business|Ekonomi|Economy)\b", text)
-        if not cm:
+        cabin = detect_cabin(text)
+        if not cabin:
             continue
-        cabin = "Business" if cm.group(1) == "Business" else "Ekonomi"
 
         ptag = box.select_one("[data-defaultprice]")
         price = parse_price(ptag["data-defaultprice"]) if (ptag and ptag.has_attr("data-defaultprice")) else None
@@ -185,6 +219,28 @@ def http_post(url, data):
     if _IMPERSONATE:
         return httpx.post(url, data=data, impersonate=_IMPERSONATE, timeout=20)
     return httpx.post(url, data=data, timeout=20)
+
+
+def load_notify_config():
+    """Bildirim ayarlarini Worker'dan (KV) oku; ulasilamazsa varsayilani kullan."""
+    try:
+        r = http_get(NOTIFY_CONFIG_URL)
+        if r.status_code == 200:
+            cfg = json.loads(r.text)
+            nt = {**DEFAULT_NOTIFY["new_ticket"], **(cfg.get("new_ticket") or {})}
+            pd = {**DEFAULT_NOTIFY["price_drop"], **(cfg.get("price_drop") or {})}
+            return {"new_ticket": nt, "price_drop": pd}
+    except Exception as e:
+        log(f"Bildirim ayari alinamadi ({e}), varsayilan kullaniliyor.")
+    return DEFAULT_NOTIFY
+
+
+def _notify_new(cabin, d, cfg):
+    """Bu (sinif, tarih) icin YENI BILET uyarisi gonderilsin mi?"""
+    nt = cfg["new_ticket"]
+    if cabin == "Business":
+        return d.month in (nt.get("Business_months") or [])
+    return bool(nt.get(cabin, False))   # Ekonomi/Premium -> True ise her ay
 
 
 def fetch_date(d: date):
@@ -324,11 +380,13 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
     if baseline:
         log("Ilk calistirma: baseline kuruluyor (bildirim gonderilmeyecek).")
 
+    cfg = DEFAULT_NOTIFY if baseline else load_notify_config()
+
     new_avail = []   # (date, {key:info})  -> yeni bilet
     price_drop = []  # (date, flight, cabin, old, new, info)
     scanned_ok = 0
     have_any_dates = 0
-    cheapest = {"Ekonomi": None, "Business": None}  # (price, date, flight) ozet icin
+    cheapest = {}    # sinif -> (price, date, flight)  ozet icin
 
     # --- Tarihleri paralel cek (curl_cffi impersonate) ---
     engine = "curl_cffi" if _IMPERSONATE else "requests"
@@ -369,17 +427,20 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
                       for k, v in st["fares"].items() if k.startswith(diso + "|")}
 
         if not baseline and fares:
-            if not prev_has:
-                # tarih tamamen acildi
-                new_avail.append((d, dict(fares)))
-            else:
-                new_keys = {k: v for k, v in fares.items() if k not in prev_fares}
-                if new_keys:
-                    new_avail.append((d, new_keys))
-                for k, info in fares.items():
-                    if k in prev_fares and info["price"] < prev_fares[k]:
-                        fl, cab = k.split("|")
-                        price_drop.append((d, fl, cab, prev_fares[k], info["price"], info))
+            # YENI BILET: sinif/ay kurallarina gore filtreli
+            new_here = {}
+            for k, info in fares.items():
+                _fl, cab = k.split("|")
+                is_new = (not prev_has) or (k not in prev_fares)
+                if is_new and _notify_new(cab, d, cfg):
+                    new_here[k] = info
+            if new_here:
+                new_avail.append((d, new_here))
+            # FIYAT DUSUSU: sinif kuralina gore (mevcut fare ucuzladiysa)
+            for k, info in fares.items():
+                _fl, cab = k.split("|")
+                if k in prev_fares and info["price"] < prev_fares[k] and cfg["price_drop"].get(cab, True):
+                    price_drop.append((d, _fl, cab, prev_fares[k], info["price"], info))
 
         # --- state guncelle (yalnizca basarili parse edilen tarih) ---
         st["fares"] = {k: v for k, v in st["fares"].items() if not k.startswith(diso + "|")}
@@ -429,7 +490,7 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
 
 def _cheapest_line(cheapest):
     lines = []
-    for cab in ("Ekonomi", "Business"):
+    for cab in ("Ekonomi", "Business", "Premium"):
         c = cheapest.get(cab)
         if c:
             price, d, fl = c
@@ -478,7 +539,7 @@ def _month_table(dates, results):
         for key, info in fares.items():
             _fl, cab = key.split("|")
             rows.append((info.get("dep") or "--:--",
-                         "E" if cab == "Ekonomi" else "B",
+                         cabin_letter(cab),
                          info["price"], info.get("seats")))
         rows.sort(key=lambda r: (r[0], r[1]))
         ds, gn = f"{d.day:02d} {AY_KISA[d.month]}", GUN_TBL[d.weekday()]
@@ -534,7 +595,7 @@ def write_latest(results):
         arr = []
         for key, info in f.items():
             fl, cab = key.split("|")
-            arr.append({"t": info.get("dep"), "c": "E" if cab == "Ekonomi" else "B",
+            arr.append({"t": info.get("dep"), "c": cabin_letter(cab),
                         "p": info["price"], "s": info.get("seats"), "fl": fl})
         arr.sort(key=lambda x: (x["t"] or "", x["c"]))
         board[d.isoformat()] = arr

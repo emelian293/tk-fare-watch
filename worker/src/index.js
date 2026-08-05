@@ -27,7 +27,13 @@ const ALL_WORDS = ["tümü", "tumu", "tüm", "tum", "hepsi", "all", "hep"];
 
 export default {
   async fetch(request, env) {
-    if (request.method !== "POST") return new Response("TK Fare-Watch bot up");
+    if (request.method !== "POST") {
+      // Python tarama scripti bildirim ayarlarini buradan okur
+      if (new URL(request.url).pathname === "/config")
+        return new Response(JSON.stringify(await getCfg(env)),
+          { headers: { "content-type": "application/json" } });
+      return new Response("TK Fare-Watch bot up");
+    }
     if (env.WEBHOOK_SECRET &&
         request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.WEBHOOK_SECRET) {
       return new Response("forbidden", { status: 403 });
@@ -88,6 +94,12 @@ async function route(env, msg) {
       return cmdRevoke(env, chatId, id);
     if (["kullanicilar", "kullanici", "liste", "users"].includes(cmd))
       return cmdList(env, chatId);
+    if (["ayarlar", "ayar", "settings"].includes(cmd))
+      return cmdSettings(env, chatId);
+    if (cmd === "business")
+      return cmdBusiness(env, chatId, parts.slice(1));
+    if (cmd === "bildirim")
+      return cmdBildirim(env, chatId, parts.slice(1));
   }
 
   // --- Erisim kontrolu ---
@@ -154,6 +166,97 @@ async function requestAccess(env, msg) {
   }
 }
 
+// ---------- Bildirim ayarlari (KV) ----------
+
+const DEFAULT_CFG = {
+  new_ticket: { Ekonomi: true, Premium: true, Business_months: [8] },
+  price_drop: { Ekonomi: true, Business: true, Premium: true },
+};
+
+async function getCfg(env) {
+  if (!env.ACCESS) return DEFAULT_CFG;
+  try {
+    const raw = await env.ACCESS.get("cfg");
+    if (!raw) return DEFAULT_CFG;
+    const c = JSON.parse(raw);
+    return {
+      new_ticket: { ...DEFAULT_CFG.new_ticket, ...(c.new_ticket || {}) },
+      price_drop: { ...DEFAULT_CFG.price_drop, ...(c.price_drop || {}) },
+    };
+  } catch { return DEFAULT_CFG; }
+}
+
+async function putCfg(env, cfg) { await env.ACCESS.put("cfg", JSON.stringify(cfg)); }
+
+const ONOFF = (b) => (b ? "açık ✅" : "kapalı ❌");
+const AC_WORDS = ["ac", "acik", "open", "on", "1", "evet", "aç", "açık"];
+const KAPA_WORDS = ["kapa", "kapat", "kapali", "off", "0", "hayir", "kapalı", "hayır"];
+
+async function cmdSettings(env, chatId) {
+  const c = await getCfg(env);
+  const months = (c.new_ticket.Business_months || []).map((m) => AY_ADI[m]).join(", ") || "kapalı";
+  const t =
+    "⚙️ <b>Bildirim ayarları</b>\n\n" +
+    "<b>🟢 Yeni bilet</b>\n" +
+    `• Ekonomi: ${ONOFF(c.new_ticket.Ekonomi)} (her ay)\n` +
+    `• Premium: ${ONOFF(c.new_ticket.Premium)} (her ay)\n` +
+    `• Business: <b>${months}</b>\n\n` +
+    "<b>🔻 Fiyat düşüşü</b> (her ay)\n" +
+    `• Ekonomi: ${ONOFF(c.price_drop.Ekonomi)}\n` +
+    `• Business: ${ONOFF(c.price_drop.Business)}\n` +
+    `• Premium: ${ONOFF(c.price_drop.Premium)}\n\n` +
+    "<b>Değiştir:</b>\n" +
+    "<code>/business eylül ekim</code> — Business yeni bilet ayları\n" +
+    "<code>/business kapalı</code> — Business yeni bileti kapat\n" +
+    "<code>/bildirim yeni-premium kapa</code> — bir ayarı aç/kapat\n" +
+    "<i>anahtarlar: yeni-ekonomi, yeni-premium, dusus-ekonomi, dusus-business, dusus-premium</i>";
+  return send(env, chatId, t, "HTML");
+}
+
+async function cmdBusiness(env, chatId, args) {
+  if (!args.length)
+    return send(env, chatId, "Kullanım: <code>/business eylül ekim</code> ya da <code>/business kapalı</code>", "HTML");
+  const c = await getCfg(env);
+  const first = trNorm(args[0].toLowerCase());
+  if (["kapali", "kapat", "yok", "hicbiri", "hic", "none", "off"].includes(first)) {
+    c.new_ticket.Business_months = [];
+  } else {
+    const months = [];
+    for (const a of args) {
+      const key = trNorm(a.toLowerCase());
+      if (key in AY_NO) months.push(AY_NO[key]);
+      else if (/^\d{1,2}$/.test(a) && +a >= 1 && +a <= 12) months.push(+a);
+    }
+    if (!months.length)
+      return send(env, chatId, "Ay anlaşılmadı. Örn: <code>/business eylül</code>", "HTML");
+    c.new_ticket.Business_months = [...new Set(months)].sort((a, b) => a - b);
+  }
+  await putCfg(env, c);
+  const lbl = c.new_ticket.Business_months.map((m) => AY_ADI[m]).join(", ") || "kapalı";
+  return send(env, chatId, `✅ Business yeni bilet ayları: <b>${lbl}</b>`, "HTML");
+}
+
+async function cmdBildirim(env, chatId, args) {
+  if (args.length < 2)
+    return send(env, chatId, "Kullanım: <code>/bildirim yeni-ekonomi kapa</code>", "HTML");
+  const key = trNorm(args[0].toLowerCase());
+  const v = trNorm(args[1].toLowerCase());
+  const val = AC_WORDS.includes(v) ? true : KAPA_WORDS.includes(v) ? false : null;
+  if (val === null) return send(env, chatId, "İkinci kelime <code>ac</code> ya da <code>kapa</code> olmalı.", "HTML");
+  const map = {
+    "yeni-ekonomi": ["new_ticket", "Ekonomi"], "yeni-premium": ["new_ticket", "Premium"],
+    "dusus-ekonomi": ["price_drop", "Ekonomi"], "dusus-business": ["price_drop", "Business"],
+    "dusus-premium": ["price_drop", "Premium"],
+  };
+  const path = map[key];
+  if (!path)
+    return send(env, chatId, "Bilinmeyen anahtar.\nGeçerli: yeni-ekonomi, yeni-premium, dusus-ekonomi, dusus-business, dusus-premium", "HTML");
+  const c = await getCfg(env);
+  c[path[0]][path[1]] = val;
+  await putCfg(env, c);
+  return send(env, chatId, `✅ <b>${key}</b> → ${val ? "açık ✅" : "kapalı ❌"}`, "HTML");
+}
+
 // ---------- Ay sorgusu ----------
 
 async function handleQuery(env, chatId, text) {
@@ -178,7 +281,7 @@ async function handleQuery(env, chatId, text) {
   const label = want === "all" ? "Tüm aylar" : AY_ADI[want];
   await send(env, chatId,
     `🎫 <b>${label} — ASB→İstanbul</b> · ${keys.length} tarihte bilet\n` +
-    `🟢 E=Ekonomi · 🔴 B=Business · Klt=son N koltuk · tek yön/USD\n` +
+    `E=Ekonomi · B=Business · P=Premium · Klt=son N koltuk · tek yön/USD\n` +
     `<i>güncelleme: ${esc(data.updated || "")}</i>`, "HTML");
 
   const byMonth = {};
@@ -255,6 +358,8 @@ function helpText(isOwner) {
     "🟢 yeni bilet / 🔻 fiyat düşüşü olunca ayrıca otomatik haber gelir.";
   if (isOwner)
     t += "\n\n<b>Yönetici komutları</b>\n" +
+      "<code>/ayarlar</code> — bildirim ayarları\n" +
+      "<code>/business eylül</code> — Business yeni bilet ayı\n" +
       "<code>/izinver &lt;id&gt; [ad]</code> — erişim ver\n" +
       "<code>/izinal &lt;id&gt;</code> — erişimi al\n" +
       "<code>/kullanicilar</code> — izinli listesi";
