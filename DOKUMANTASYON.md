@@ -116,9 +116,11 @@ Python. Yaptığı iş: tarihleri paralel tara → fiyatları çıkar → öncek
 - **Bot token** BotFather'dan alındı. İki yerde kullanılır: GitHub (uyarı gönderir) + Cloudflare (cevap verir).
 - Uyarılar `TELEGRAM_CHAT_ID`'ye gider; bot cevapları mesajı atan kişiye gider.
 
-### 🅕 KV (erişim listesi) — `ACCESS`
-- İzinli kullanıcı ID'leri burada (`u:<id>` anahtarlarıyla).
-- Yönetim Telegram'dan: `/izinver <id> [ad]`, `/izinal <id>`, `/kullanicilar`.
+### 🅕 KV (erişim listesi + bildirim ayarları) — `ACCESS`
+- İzinli kullanıcı ID'leri (`u:<id>` anahtarları) + bildirim ayarları (`cfg` anahtarı) burada.
+- Erişim yönetimi: `/izinver <id> [ad]`, `/izinal <id>`, `/kullanicilar`.
+- Bildirim ayarları: `/ayarlar`, `/business <ay>`, `/bildirim <anahtar> <ac|kapa>` (bkz. Bölüm 6 ➏.5).
+- Worker bu ayarları `GET /config` ile sunar; Python tarama scripti oradan okur.
 
 ---
 
@@ -188,6 +190,27 @@ cd "/Users/sohbet/Desktop/tk-fare-watch/worker" && npx wrangler secret put BOT_T
 ### ➏ Erişim (paylaşım) yönet
 Telegram'da (sahip olarak): `/izinver <id> [ad]` · `/izinal <id>` · `/kullanicilar`.
 Kişi bota yazınca ID'sini görür + sana istek bildirimi düşer.
+
+### ➏.5 Bildirim kurallarını yönet (Telegram'dan, kod gerektirmez)
+Hangi biletlerin **otomatik uyarı** üreteceğini bottan ayarlarsın. Ayarlar Cloudflare **KV**'de tutulur,
+Python her taramada Worker'ın `/config` adresinden okur.
+
+**Varsayılan kurallar:**
+- 🟢 Yeni bilet: **Ekonomi** (her ay) + **Premium** (her ay) + **Business** (sadece seçili aylar, başlangıç: Ağustos)
+- 🔻 Fiyat düşüşü: **Ekonomi + Business + Premium** (her ay, öncekine göre ucuzlayınca)
+
+**Komutlar (sahip):**
+| Komut | İş |
+|-------|-----|
+| `/ayarlar` | Mevcut ayarları göster |
+| `/business eylül ekim` | Business yeni-bilet aylarını ayarla |
+| `/business kapalı` | Business yeni-bileti kapat |
+| `/bildirim <anahtar> <ac\|kapa>` | Bir ayarı aç/kapat |
+
+Anahtarlar: `yeni-ekonomi`, `yeni-premium`, `dusus-ekonomi`, `dusus-business`, `dusus-premium`.
+Örnek: **Ağustos bitince** `/business eylül` → artık Eylül Business yeni biletleri gelir. (Kod/commit yok, anında geçerli.)
+
+> Kurallar sadece **otomatik uyarıları** etkiler. Bota `eylül`/`tümü` yazınca gelen tam liste her zaman **her şeyi** gösterir.
 
 ### ➐ GitHub token'ını yenile (süresi dolunca)
 GitHub → Settings → Developer settings → Fine-grained tokens → yeni token (repo: tk-fare-watch, **Actions: Read and write**). Sonra:
