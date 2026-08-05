@@ -252,6 +252,7 @@ npx wrangler tail                          # botun canlı loglarını izle
 | Belirti | Olası sebep | Ne yap |
 |---------|-------------|--------|
 | Hiç uyarı gelmiyor, liste boş | Site HTML'i değişti (parser bozuldu) veya erişim engellendi | `gh run view <id> --log` ile bak; `parse_fares` güncellenmeli |
+| "⚠️ Olası site sorunu…" mesajı | Tarama aniden 0 bilet buldu (site anlık sorun) | **Çöküş koruması** devreye girdi: veri korundu, sıfırlanmadı. Genelde kendiliğinden düzelir; düzelmezse siteyi/parser'ı kontrol et |
 | "⚠️ Tarama tetiklenemedi" mesajı | GitHub token süresi doldu | Rehber ➐: yeni `GH_TOKEN` |
 | Bot cevap vermiyor | Webhook koptu veya BOT_TOKEN değişti | `getWebhookInfo` kontrol; secret'ları doğrula |
 | Actions kırmızı (hata) | Kod hatası / bağımlılık | Run log'una bak |
