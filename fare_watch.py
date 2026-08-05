@@ -461,50 +461,58 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
 
     log(f"Tarama bitti: {scanned_ok}/{len(dates)} tarih basarili, {have_any_dates} tarihte bilet var.")
 
-    # --- COKME KORUMASI: onceden cok bilet vardi, simdi hicbir tarihte yok -> olasi site sorunu ---
-    if (not baseline) and scanned_ok > 0 and have_any_dates == 0 and prev_total >= COLLAPSE_MIN:
-        log(f"!! Olasi site sorunu: onceden {prev_total} tarihte bilet vardi, simdi 0. "
-            f"State/latest KORUNUYOR, bildirim yok.")
+    healthy = scanned_ok > 0 and have_any_dates >= COLLAPSE_MIN
+    today = date.today().isoformat()
+
+    # --- COKME KORUMASI (normal mod): ani BUYUK dusus (>=%50) -> olasi site sorunu, state KORU ---
+    if (not baseline) and scanned_ok > 0 and prev_total >= COLLAPSE_MIN and have_any_dates < prev_total * 0.5:
+        log(f"!! Olasi site sorunu: onceden {prev_total} tarihte bilet vardi, simdi {have_any_dates} "
+            f"(ani buyuk dusus). State/latest KORUNUYOR, bildirim yok.")
         st["fares"] = snap_fares          # eski veriyi geri koy (yanlis sifirlamayi onle)
         st["dates_has_any"] = snap_has
         if not st.get("collapse_warned"):
             st["collapse_warned"] = True
-            tg_send(f"⚠️ Olası site sorunu: tarama hiç bilet bulamadı "
-                    f"(önceden {prev_total} tarihte vardı). Veriler korundu, bir kontrol et.", dry=dry)
+            tg_send(f"⚠️ Olası site sorunu: tarama {have_any_dates} bilet buldu "
+                    f"(önceden {prev_total} vardı). Veriler korundu, bir kontrol et.", dry=dry)
         if not dry:
-            save_state(st)                # eski veri + uyarildi bayragi; latest.json'a DOKUNMA
+            save_state(st)
         return
     if st.get("collapse_warned"):
         st["collapse_warned"] = False     # site duzeldi, bayragi temizle
 
-    # --- Worker'in okuyacagi guncel veri ---
-    if not dry:
-        write_latest(results)
-
-    # --- Bildirimler ---
-    today = date.today().isoformat()
+    # --- BASELINE: yalnizca SAGLIKLI tarama ile kur (cirpinma sirasinda erteler) ---
     if baseline:
-        title = "✅ TK Fare-Watch başladı — mevcut biletler (ASB→İstanbul)"
-        for pm, m in full_report_messages(results, title, cheapest):
+        if not healthy:
+            log(f"Baseline erteleniyor: tarama saglksz ({have_any_dates} bilet). "
+                f"Site duzelince tekrar denenecek.")
+            return   # started=False kalir, kaydetme -> yeniden denenir
+        if not dry:
+            write_latest(results)
+        for pm, m in full_report_messages(
+                results, "✅ TK Fare-Watch senkronize edildi — mevcut biletler (ASB→İstanbul)", cheapest):
             tg_send(m, dry=dry, parse_mode=pm)
         st["started"] = True
         st["last_summary_date"] = today
-    else:
-        if new_avail:
-            tg_send(_new_avail_message(new_avail), dry=dry)
-        if price_drop:
-            tg_send(_price_drop_message(price_drop), dry=dry)
-        if not new_avail and not price_drop:
-            log("Degisiklik yok, anlik bildirim yok.")
+        if not dry:
+            save_state(st)
+        return
 
-        if force_report:
-            # Elle istenen tam liste (ay ay tablo)
-            for pm, m in full_report_messages(results, "📋 Mevcut biletler (ASB→İstanbul)", cheapest):
-                tg_send(m, dry=dry, parse_mode=pm)
-        elif scanned_ok and st.get("last_summary_date") != today:
-            # Gunde 1 kez kisa ozet (tam liste botta 'ay' yazarak alinir)
-            tg_send(daily_brief_message(results, cheapest), dry=dry, parse_mode="HTML")
-            st["last_summary_date"] = today
+    # --- NORMAL akis: guncel veriyi yaz + degisiklik bildirimleri ---
+    if not dry:
+        write_latest(results)
+    if new_avail:
+        tg_send(_new_avail_message(new_avail), dry=dry)
+    if price_drop:
+        tg_send(_price_drop_message(price_drop), dry=dry)
+    if not new_avail and not price_drop:
+        log("Degisiklik yok, anlik bildirim yok.")
+
+    if force_report:
+        for pm, m in full_report_messages(results, "📋 Mevcut biletler (ASB→İstanbul)", cheapest):
+            tg_send(m, dry=dry, parse_mode=pm)
+    elif scanned_ok and st.get("last_summary_date") != today:
+        tg_send(daily_brief_message(results, cheapest), dry=dry, parse_mode="HTML")
+        st["last_summary_date"] = today
 
     if not dry:
         save_state(st)
