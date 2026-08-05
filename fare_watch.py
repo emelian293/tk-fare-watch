@@ -47,6 +47,8 @@ DEST        = "IST"                 # Istanbul
 DATE_START  = date(2026, 8, 1)      # izleme penceresi baslangici (gecmis gunler atlanir)
 DATE_END    = date(2026, 10, 31)    # izleme penceresi sonu
 MAX_WORKERS = 6                     # es zamanli istek sayisi (paralel tarama)
+COLLAPSE_MIN = 5                    # onceden >=bu kadar tarihte bilet varken tarama 0 bulursa
+                                    # -> olasi site sorunu say, state'i KORU (yanlis sifirlamayi onle)
 REQUEST_TIMEOUT = 20                # her istek zaman asimi (sn)
 FETCH_RETRIES = 3                   # basarisiz istekte tekrar sayisi
 # Telegram bilgileri ORTAM DEGISKENINDEN gelir (kodda tutma!)
@@ -300,6 +302,7 @@ def load_state():
     st.setdefault("dates_has_any", {})  # 'YYYY-MM-DD' -> bool
     st.setdefault("last_summary_date", None)
     st.setdefault("started", False)
+    st.setdefault("collapse_warned", False)
     return st
 
 
@@ -382,6 +385,11 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
 
     cfg = DEFAULT_NOTIFY if baseline else load_notify_config()
 
+    # Cokme korumasi icin: taramadan onceki durumun anlik goruntusu
+    prev_total = sum(1 for v in st["dates_has_any"].values() if v)
+    snap_fares = dict(st["fares"])
+    snap_has = dict(st["dates_has_any"])
+
     new_avail = []   # (date, {key:info})  -> yeni bilet
     price_drop = []  # (date, flight, cabin, old, new, info)
     scanned_ok = 0
@@ -452,6 +460,22 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
             ("" if fares else " (bos)"))
 
     log(f"Tarama bitti: {scanned_ok}/{len(dates)} tarih basarili, {have_any_dates} tarihte bilet var.")
+
+    # --- COKME KORUMASI: onceden cok bilet vardi, simdi hicbir tarihte yok -> olasi site sorunu ---
+    if (not baseline) and scanned_ok > 0 and have_any_dates == 0 and prev_total >= COLLAPSE_MIN:
+        log(f"!! Olasi site sorunu: onceden {prev_total} tarihte bilet vardi, simdi 0. "
+            f"State/latest KORUNUYOR, bildirim yok.")
+        st["fares"] = snap_fares          # eski veriyi geri koy (yanlis sifirlamayi onle)
+        st["dates_has_any"] = snap_has
+        if not st.get("collapse_warned"):
+            st["collapse_warned"] = True
+            tg_send(f"⚠️ Olası site sorunu: tarama hiç bilet bulamadı "
+                    f"(önceden {prev_total} tarihte vardı). Veriler korundu, bir kontrol et.", dry=dry)
+        if not dry:
+            save_state(st)                # eski veri + uyarildi bayragi; latest.json'a DOKUNMA
+        return
+    if st.get("collapse_warned"):
+        st["collapse_warned"] = False     # site duzeldi, bayragi temizle
 
     # --- Worker'in okuyacagi guncel veri ---
     if not dry:
