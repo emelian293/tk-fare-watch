@@ -47,8 +47,10 @@ DEST        = "IST"                 # Istanbul
 DATE_START  = date(2026, 8, 1)      # izleme penceresi baslangici (gecmis gunler atlanir)
 DATE_END    = date(2026, 10, 31)    # izleme penceresi sonu
 MAX_WORKERS = 6                     # es zamanli istek sayisi (paralel tarama)
-COLLAPSE_MIN = 5                    # onceden >=bu kadar tarihte bilet varken tarama 0 bulursa
-                                    # -> olasi site sorunu say, state'i KORU (yanlis sifirlamayi onle)
+COLLAPSE_MIN = 5                    # saglikli tarama esigi (baseline + tam-cokme algisi)
+DISAPPEAR_AFTER = 3                 # bir tarih kac ardisik BOS taramadan sonra gercekten silinsin
+                                    # (site cirpinmasinda yanlis "yeni bilet" uyarisini onler)
+ZERO_WARN = 4                       # tarama kac ardisik kez TAM 0 bulursa (~20 dk) uyari at
 REQUEST_TIMEOUT = 20                # her istek zaman asimi (sn)
 FETCH_RETRIES = 3                   # basarisiz istekte tekrar sayisi
 # Telegram bilgileri ORTAM DEGISKENINDEN gelir (kodda tutma!)
@@ -57,6 +59,9 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 # Bildirim ayarlari (Telegram'dan /ayarlar ile yonetilir) Worker'dan okunur:
 NOTIFY_CONFIG_URL = os.environ.get(
     "NOTIFY_CONFIG_URL", "https://tk-fare-bot.emelian293.workers.dev/config")
+# Yetkili TUM kullanicilara bildirim: Worker /broadcast (owner + KV izinliler)
+WORKER_BASE = NOTIFY_CONFIG_URL.rsplit("/config", 1)[0]
+BROADCAST_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
 DEFAULT_NOTIFY = {
     "new_ticket": {"Ekonomi": True, "Premium": True, "Business_months": [8]},
     "price_drop": {"Ekonomi": True, "Business": True, "Premium": True},
@@ -303,6 +308,8 @@ def load_state():
     st.setdefault("last_summary_date", None)
     st.setdefault("started", False)
     st.setdefault("collapse_warned", False)
+    st.setdefault("misses", {})         # 'YYYY-MM-DD' -> ardisik bos tarama sayisi (debounce)
+    st.setdefault("zero_streak", 0)     # ardisik TAM-0 tarama sayisi (tam cokme algisi)
     return st
 
 
@@ -352,6 +359,29 @@ def _chunks(text, size):
     return parts
 
 
+def broadcast(text, parse_mode=None, dry=False):
+    """Yeni bilet / fiyat dususu -> yetkili TUM kullanicilara (owner + KV izinliler).
+    Worker'in /broadcast ucuna gonderir; basarisizsa sadece owner'a duser."""
+    if dry:
+        log("BROADCAST (dry):\n" + text)
+        return True
+    if WORKER_BASE and BROADCAST_SECRET:
+        try:
+            payload = {"secret": BROADCAST_SECRET, "text": text}
+            if parse_mode:
+                payload["parse_mode"] = parse_mode
+            url = WORKER_BASE.rstrip("/") + "/broadcast"
+            kw = {"impersonate": _IMPERSONATE} if _IMPERSONATE else {}
+            r = httpx.post(url, json=payload, timeout=20, **kw)
+            if r.status_code == 200:
+                log("broadcast: yetkili kullanicilara gonderildi.")
+                return True
+            log(f"broadcast HTTP {r.status_code}: {r.text[:150]} -> owner'a dusuluyor")
+        except Exception as e:
+            log(f"broadcast hata: {e} -> owner'a dusuluyor")
+    return tg_send(text, dry=dry, parse_mode=parse_mode)
+
+
 # --- Bicimleme ---------------------------------------------------------------
 
 def gun_etiketi(d: date) -> str:
@@ -385,18 +415,9 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
 
     cfg = DEFAULT_NOTIFY if baseline else load_notify_config()
 
-    # Cokme korumasi icin: taramadan onceki durumun anlik goruntusu
     prev_total = sum(1 for v in st["dates_has_any"].values() if v)
-    snap_fares = dict(st["fares"])
-    snap_has = dict(st["dates_has_any"])
 
-    new_avail = []   # (date, {key:info})  -> yeni bilet
-    price_drop = []  # (date, flight, cabin, old, new, info)
-    scanned_ok = 0
-    have_any_dates = 0
-    cheapest = {}    # sinif -> (price, date, flight)  ozet icin
-
-    # --- Tarihleri paralel cek (curl_cffi impersonate) ---
+    # --- Tarihleri paralel cek ---
     engine = "curl_cffi" if _IMPERSONATE else "requests"
     log(f"{len(dates)} tarih {MAX_WORKERS} paralel istekle taraniyor ({engine})...")
     results = {}
@@ -410,84 +431,50 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
                 results[dd] = ("fail", None)
                 log(f"[{dd}] thread hata: {e}")
 
-    for d in dates:
-        diso = d.isoformat()
-        status, fares = results.get(d, ("fail", None))
-
-        if status == "fail":
-            log(f"[{diso}] atlandi (fetch fail) - state korunuyor")
-            continue
-
-        scanned_ok += 1
-        fares = fares or {}
-        if fares:
-            have_any_dates += 1
-
-        # ozet icin en ucuzlari topla
-        for key, info in fares.items():
-            _f, cab = key.split("|")
-            cur = cheapest.get(cab)
-            if cur is None or info["price"] < cur[0]:
-                cheapest[cab] = (info["price"], d, _f)
-
-        prev_has = st["dates_has_any"].get(diso)
-        prev_fares = {k.split("|", 1)[1]: v
-                      for k, v in st["fares"].items() if k.startswith(diso + "|")}
-
-        if not baseline and fares:
-            # YENI BILET: sinif/ay kurallarina gore filtreli
-            new_here = {}
-            for k, info in fares.items():
-                _fl, cab = k.split("|")
-                is_new = (not prev_has) or (k not in prev_fares)
-                if is_new and _notify_new(cab, d, cfg):
-                    new_here[k] = info
-            if new_here:
-                new_avail.append((d, new_here))
-            # FIYAT DUSUSU: sinif kuralina gore (mevcut fare ucuzladiysa)
-            for k, info in fares.items():
-                _fl, cab = k.split("|")
-                if k in prev_fares and info["price"] < prev_fares[k] and cfg["price_drop"].get(cab, True):
-                    price_drop.append((d, _fl, cab, prev_fares[k], info["price"], info))
-
-        # --- state guncelle (yalnizca basarili parse edilen tarih) ---
-        st["fares"] = {k: v for k, v in st["fares"].items() if not k.startswith(diso + "|")}
-        for k, info in fares.items():
-            st["fares"][f"{diso}|{k}"] = info["price"]
-        st["dates_has_any"][diso] = bool(fares)
-
-        log(f"[{diso}] {gun_etiketi(d).split()[1]:9} -> {len(fares)} tarife" +
-            ("" if fares else " (bos)"))
-
-    log(f"Tarama bitti: {scanned_ok}/{len(dates)} tarih basarili, {have_any_dates} tarihte bilet var.")
-
-    healthy = scanned_ok > 0 and have_any_dates >= COLLAPSE_MIN
+    scanned_ok = sum(1 for (s, _) in results.values() if s != "fail")
+    scan_found = sum(1 for (s, f) in results.values() if s == "ok" and f)
     today = date.today().isoformat()
 
-    # --- COKME KORUMASI (normal mod): ani BUYUK dusus (>=%50) -> olasi site sorunu, state KORU ---
-    if (not baseline) and scanned_ok > 0 and prev_total >= COLLAPSE_MIN and have_any_dates < prev_total * 0.5:
-        log(f"!! Olasi site sorunu: onceden {prev_total} tarihte bilet vardi, simdi {have_any_dates} "
-            f"(ani buyuk dusus). State/latest KORUNUYOR, bildirim yok.")
-        st["fares"] = snap_fares          # eski veriyi geri koy (yanlis sifirlamayi onle)
-        st["dates_has_any"] = snap_has
-        if not st.get("collapse_warned"):
+    cheapest = {}    # sinif -> (price, date, flight)
+    for d, (s, f) in results.items():
+        if s != "ok":
+            continue
+        for key, info in (f or {}).items():
+            _fl, cab = key.split("|")
+            cur = cheapest.get(cab)
+            if cur is None or info["price"] < cur[0]:
+                cheapest[cab] = (info["price"], d, _fl)
+
+    log(f"Tarama bitti: {scanned_ok}/{len(dates)} basarili, ham {scan_found} tarihte bilet.")
+
+    # --- TAM COKME (outage): onceden saglikli, tarama TAM 0 -> state DONDUR (mutasyon yok) ---
+    if (not baseline) and scanned_ok > 0 and scan_found == 0 and prev_total >= COLLAPSE_MIN:
+        st["zero_streak"] = st.get("zero_streak", 0) + 1
+        log(f"!! Tam cokme: tarama 0 bilet (onceden {prev_total}). State donduruldu (streak={st['zero_streak']}).")
+        if st["zero_streak"] >= ZERO_WARN and not st.get("collapse_warned"):
             st["collapse_warned"] = True
-            tg_send(f"⚠️ Olası site sorunu: tarama {have_any_dates} bilet buldu "
-                    f"(önceden {prev_total} vardı). Veriler korundu, bir kontrol et.", dry=dry)
+            tg_send(f"⚠️ Site ~{ZERO_WARN*5} dakikadır hiç bilet döndürmüyor "
+                    f"(olası geçici site sorunu). Veriler korundu.", dry=dry)
         if not dry:
             save_state(st)
         return
+    st["zero_streak"] = 0
     if st.get("collapse_warned"):
-        st["collapse_warned"] = False     # site duzeldi, bayragi temizle
+        st["collapse_warned"] = False
 
     # --- BASELINE: yalnizca SAGLIKLI tarama ile kur (cirpinma sirasinda erteler) ---
     if baseline:
-        if not healthy:
-            log(f"Baseline erteleniyor: tarama saglksz ({have_any_dates} bilet). "
-                f"Site duzelince tekrar denenecek.")
-            return   # started=False kalir, kaydetme -> yeniden denenir
+        if scan_found < COLLAPSE_MIN:
+            log(f"Baseline erteleniyor: saglksz tarama ({scan_found} bilet).")
+            return
+        for d, (s, f) in results.items():
+            if s == "ok" and f:
+                diso = d.isoformat()
+                for k, info in f.items():
+                    st["fares"][f"{diso}|{k}"] = info["price"]
+                st["dates_has_any"][diso] = True
         if not dry:
-            write_latest(results)
+            write_latest(results, st)
         for pm, m in full_report_messages(
                 results, "✅ TK Fare-Watch senkronize edildi — mevcut biletler (ASB→İstanbul)", cheapest):
             tg_send(m, dry=dry, parse_mode=pm)
@@ -497,20 +484,67 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
             save_state(st)
         return
 
-    # --- NORMAL akis: guncel veriyi yaz + degisiklik bildirimleri ---
+    # --- NORMAL: per-tarih debounce + degisiklik tespiti ---
+    new_avail = []
+    price_drop = []
+    for d in dates:
+        diso = d.isoformat()
+        status, fares = results.get(d, ("fail", None))
+        if status == "fail":
+            continue
+        prev_has = st["dates_has_any"].get(diso)
+        prev_fares = {k.split("|", 1)[1]: v
+                      for k, v in st["fares"].items() if k.startswith(diso + "|")}
+
+        if status == "empty" or not fares:
+            # Bos dondu: onceden doluysa HEMEN silme (cirpinma) -> sayaci artir, veriyi KORU
+            if prev_has:
+                miss = st["misses"].get(diso, 0) + 1
+                if miss >= DISAPPEAR_AFTER:
+                    st["fares"] = {k: v for k, v in st["fares"].items() if not k.startswith(diso + "|")}
+                    st["dates_has_any"][diso] = False
+                    st["misses"].pop(diso, None)
+                else:
+                    st["misses"][diso] = miss
+            else:
+                st["dates_has_any"][diso] = False
+                st["misses"].pop(diso, None)
+            continue
+
+        # Dolu tarih
+        st["misses"].pop(diso, None)
+        new_here = {}
+        for k, info in fares.items():
+            _fl, cab = k.split("|")
+            is_new = (not prev_has) or (k not in prev_fares)
+            if is_new and _notify_new(cab, d, cfg):
+                new_here[k] = info
+        if new_here:
+            new_avail.append((d, new_here))
+        for k, info in fares.items():
+            _fl, cab = k.split("|")
+            if k in prev_fares and info["price"] < prev_fares[k] and cfg["price_drop"].get(cab, True):
+                price_drop.append((d, _fl, cab, prev_fares[k], info["price"], info))
+        st["fares"] = {k: v for k, v in st["fares"].items() if not k.startswith(diso + "|")}
+        for k, info in fares.items():
+            st["fares"][f"{diso}|{k}"] = info["price"]
+        st["dates_has_any"][diso] = True
+
     if not dry:
-        write_latest(results)
+        write_latest(results, st)
+
+    # --- Bildirimler: yeni bilet + fiyat dususu -> YETKILI HERKESE (broadcast) ---
     if new_avail:
-        tg_send(_new_avail_message(new_avail), dry=dry)
+        broadcast(_new_avail_message(new_avail), parse_mode="HTML", dry=dry)
     if price_drop:
-        tg_send(_price_drop_message(price_drop), dry=dry)
+        broadcast(_price_drop_message(price_drop), parse_mode="HTML", dry=dry)
     if not new_avail and not price_drop:
         log("Degisiklik yok, anlik bildirim yok.")
 
     if force_report:
         for pm, m in full_report_messages(results, "📋 Mevcut biletler (ASB→İstanbul)", cheapest):
             tg_send(m, dry=dry, parse_mode=pm)
-    elif scanned_ok and st.get("last_summary_date") != today:
+    elif scan_found >= COLLAPSE_MIN and st.get("last_summary_date") != today:
         tg_send(daily_brief_message(results, cheapest), dry=dry, parse_mode="HTML")
         st["last_summary_date"] = today
 
@@ -530,27 +564,33 @@ def _cheapest_line(cheapest):
     return "\n".join(lines) if lines else "  (su an satista bilet yok)"
 
 
+def _gun_baslik(d):
+    return f"{d.day} {AY_ADI[d.month]} {GUN_ADI[d.weekday()]}"
+
+
 def _new_avail_message(new_avail):
-    out = ["🟢 YENI BILET  ASB->IST"]
+    out = ["🟢 <b>Yeni bilet</b> — ASB→İstanbul"]
     for d, fares in sorted(new_avail, key=lambda x: x[0]):
-        out.append(f"\n{gun_etiketi(d)}")
-        for key, info in sorted(fares.items()):
-            fl, cab = key.split("|")
-            out.append(fare_satiri(fl, cab, info))
-        out.append(f"  🔗 {search_url(d)}")
+        out.append(f"\n<b>{_gun_baslik(d)}</b>")
+        rows = []
+        for key, info in fares.items():
+            _fl, cab = key.split("|")
+            rows.append((info.get("dep") or "--:--", cab, info["price"], info.get("seats")))
+        for dep, cab, price, seats in sorted(rows):
+            seat = f" · <b>son {seats} koltuk</b>" if seats else ""
+            out.append(f"  {dep} · {cab} · <b>{price:.0f}$</b>{seat}")
     return "\n".join(out)
 
 
 def _price_drop_message(price_drop):
-    out = ["🔻 FIYAT DUSTU  ASB->IST"]
+    out = ["🔻 <b>Fiyat düştü</b> — ASB→İstanbul"]
     last_day = None
     for d, fl, cab, old, new, info in sorted(price_drop, key=lambda x: x[0]):
         if d != last_day:
-            out.append(f"\n{gun_etiketi(d)}")
+            out.append(f"\n<b>{_gun_baslik(d)}</b>")
             last_day = d
         dep = info.get("dep") or "--:--"
-        out.append(f"  {dep} {fl} · {cab}: {old:.0f}$ -> {new:.0f}$")
-        out.append(f"  🔗 {search_url(d)}")
+        out.append(f"  {dep} · {cab}: {old:.0f}$ → <b>{new:.0f}$</b>")
     return "\n".join(out)
 
 
@@ -618,19 +658,36 @@ def daily_brief_message(results, cheapest):
             "\n\nDetay için bota ay adı yaz (ör. <b>eylül</b>) ya da <b>tümü</b>.")
 
 
-def write_latest(results):
-    """Worker'in okuyacagi tam veri (saat/sinif/fiyat/koltuk) -> latest.json."""
+def write_latest(results, st):
+    """
+    Worker'in okuyacagi tam veri -> latest.json. BIRLESTIRMELI:
+    - taze veri gelen tarih guncellenir,
+    - gercekten silinen (debounce sonrasi has_any=False) tarih cikarilir,
+    - gecici bos (debounce ile korunan) / fail tarih icin ESKI kayit korunur.
+    Boylece site cirpinsa da bot listesi sabit kalir.
+    """
     board = {}
+    if os.path.exists(LATEST_FILE):
+        try:
+            with open(LATEST_FILE, encoding="utf-8") as fp:
+                board = (json.load(fp) or {}).get("dates", {}) or {}
+        except Exception:
+            board = {}
     for d, (s, f) in results.items():
-        if s != "ok" or not f:
-            continue
-        arr = []
-        for key, info in f.items():
-            fl, cab = key.split("|")
-            arr.append({"t": info.get("dep"), "c": cabin_letter(cab),
-                        "p": info["price"], "s": info.get("seats"), "fl": fl})
-        arr.sort(key=lambda x: (x["t"] or "", x["c"]))
-        board[d.isoformat()] = arr
+        diso = d.isoformat()
+        if s == "ok" and f:
+            arr = []
+            for key, info in f.items():
+                fl, cab = key.split("|")
+                arr.append({"t": info.get("dep"), "c": cabin_letter(cab),
+                            "p": info["price"], "s": info.get("seats"), "fl": fl})
+            arr.sort(key=lambda x: (x["t"] or "", x["c"]))
+            board[diso] = arr
+        elif s == "empty" and not st["dates_has_any"].get(diso):
+            board.pop(diso, None)   # gercekten gitti (debounce sonrasi)
+        # else: debounce-kept / fail -> eski kaydi KORU
+    valid = {d.isoformat() for d in monitored_dates()}
+    board = {k: v for k, v in board.items() if k in valid}   # gecmis/aralik disi temizle
     data = {"updated": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
             "range": f"{max(date.today(), DATE_START).isoformat()}..{DATE_END.isoformat()}",
             "dates": board}

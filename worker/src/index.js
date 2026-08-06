@@ -34,6 +34,15 @@ export default {
           { headers: { "content-type": "application/json" } });
       return new Response("TK Fare-Watch bot up");
     }
+    // Python tarama scripti bildirimleri buradan YETKILI HERKESE yollar
+    if (new URL(request.url).pathname === "/broadcast") {
+      let body;
+      try { body = await request.json(); } catch { return new Response("bad", { status: 400 }); }
+      if (!env.WEBHOOK_SECRET || body.secret !== env.WEBHOOK_SECRET)
+        return new Response("forbidden", { status: 403 });
+      await broadcastToAll(env, body.text, body.parse_mode);
+      return new Response("ok");
+    }
     if (env.WEBHOOK_SECRET &&
         request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.WEBHOOK_SECRET) {
       return new Response("forbidden", { status: 403 });
@@ -75,6 +84,16 @@ async function triggerScan(env) {
   );
   if (!r.ok && env.OWNER_CHAT_ID)
     await send(env, env.OWNER_CHAT_ID, `⚠️ Tarama tetiklenemedi (GitHub ${r.status}).`);
+}
+
+async function broadcastToAll(env, text, parseMode) {
+  const ids = new Set();
+  if (env.OWNER_CHAT_ID) ids.add(String(env.OWNER_CHAT_ID));
+  if (env.ACCESS) {
+    const list = await env.ACCESS.list({ prefix: "u:" });
+    for (const k of list.keys) ids.add(k.name.slice(2));
+  }
+  for (const id of ids) await send(env, id, text, parseMode);
 }
 
 async function route(env, msg) {

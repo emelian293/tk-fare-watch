@@ -34,6 +34,7 @@ jobs:
         env:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WEBHOOK_SECRET:   ${{ secrets.WEBHOOK_SECRET }}
         run: python fare_watch.py ${{ github.event.inputs.report == 'true' && '--report' || '' }}
 
       - name: Durumu kaydet (state.json)
