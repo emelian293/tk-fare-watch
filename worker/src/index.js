@@ -68,22 +68,53 @@ async function triggerScan(env) {
   const owner = env.GH_OWNER || "emelian293";
   const repo = env.GH_REPO || "tk-fare-watch";
   const wf = env.GH_WORKFLOW || "watch.yml";
-  const r = await fetch(
-    `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${wf}/dispatches`,
-    {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${env.GH_TOKEN}`,
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "tk-fare-bot",
-      },
-      // report=false -> otomatik tarama tam liste GONDERMEZ (sadece yeni bilet/fiyat + gunluk ozet)
-      body: JSON.stringify({ ref: "main", inputs: { report: "false" } }),
-    }
-  );
-  if (!r.ok && env.OWNER_CHAT_ID)
-    await send(env, env.OWNER_CHAT_ID, `⚠️ Tarama tetiklenemedi (GitHub ${r.status}).`);
+  const url = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${wf}/dispatches`;
+  const headers = {
+    "Authorization": `Bearer ${env.GH_TOKEN}`,
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "tk-fare-bot",
+  };
+  // report=false -> otomatik tarama tam liste GONDERMEZ (sadece yeni bilet/fiyat)
+  const body = JSON.stringify({ ref: "main", inputs: { report: "false" } });
+
+  // Gecici hatalara karsi 3 kez dene (kalici/yetki hatasinda erken cik)
+  let status = 0;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const r = await fetch(url, { method: "POST", headers, body });
+      status = r.status;
+      if (r.ok) break;
+    } catch (_) { status = 0; }
+    if (status === 401 || status === 403 || status === 404) break;
+    await new Promise((res) => setTimeout(res, 1500));
+  }
+  const ok = status >= 200 && status < 300;
+
+  if (!env.ACCESS) { // KV yoksa: sadece basarisizsa uyar
+    if (!ok && env.OWNER_CHAT_ID)
+      await send(env, env.OWNER_CHAT_ID, `⚠️ Tarama tetiklenemedi (GitHub ${status}).`);
+    return;
+  }
+  if (ok) { // basarili -> sayac + uyari bayragi temizle
+    await env.ACCESS.delete("sys:trigfail");
+    await env.ACCESS.delete("sys:trigwarned");
+    return;
+  }
+  // basarisiz: ardisik sayaci artir; sadece KALICI ya da YETKI hatasinda ve BIR KEZ uyar
+  const fails = (parseInt((await env.ACCESS.get("sys:trigfail")) || "0", 10) || 0) + 1;
+  await env.ACCESS.put("sys:trigfail", String(fails));
+  const actionable = status === 401 || status === 403 || status === 404;
+  const persistent = fails >= 3; // ~15 dk ardisik
+  if ((actionable || persistent) && !(await env.ACCESS.get("sys:trigwarned")) && env.OWNER_CHAT_ID) {
+    await env.ACCESS.put("sys:trigwarned", "1");
+    const why = (status === 401 || status === 403)
+      ? "GitHub token süresi dolmuş olabilir — yenilemen gerekebilir."
+      : status === 404
+        ? "workflow bulunamadı."
+        : `${fails} taramadır tetiklenemiyor (~${fails * 5} dk).`;
+    await send(env, env.OWNER_CHAT_ID, `⚠️ Tarama tetiklenemedi (GitHub ${status}). ${why}`);
+  }
 }
 
 async function broadcastToAll(env, text, parseMode) {
