@@ -160,13 +160,34 @@ def cabin_letter(cabin):
     return {"Ekonomi": "E", "Business": "B", "Premium": "P"}.get(cabin, (cabin[:1].upper() or "?"))
 
 
-def parse_fares(html: str):
+_AY_RE = re.compile(
+    r"(\d{1,2})\s+(Ocak|Şubat|Mart|Nisan|Mayıs|Haziran|Temmuz|Ağustos|Eylül|Ekim|Kasım|Aralık)")
+
+
+def box_departure_date(text, ref_year):
+    """Bir result-box metnindeki ILK 'GG Ay' (kalkis tarihi) -> date. Bulamazsa None."""
+    m = _AY_RE.search(text)
+    if not m:
+        return None
+    mon = AY_NO.get(m.group(2).lower())
+    if not mon:
+        return None
+    try:
+        return date(ref_year, mon, int(m.group(1)))
+    except ValueError:
+        return None
+
+
+def parse_fares(html: str, query_date=None):
     """
     Sonuc sayfasindan (tarih, ucus, sinif) -> en dusuk fiyat cikarir.
+    query_date verilirse: kutu-ici KALKIS tarihi bu tarihle uyusmayan kutular ELENIR
+    (sitenin 'yakin tarih onerisi' hayaletlerini onler -> yanlis pozitif kalkar).
     Donus: dict  { 'T5921|Business': {'price':575.0,'dep':'18:20','arr':'20:40','seats':3}, ... }
     """
     soup = BeautifulSoup(html, "html.parser")
     result = {}
+    mismatch = []
     for box in soup.select(".result-box"):
         text = box.get_text(" ", strip=True)
 
@@ -174,6 +195,13 @@ def parse_fares(html: str):
         if not m:
             continue
         flight = m.group(0)
+
+        # TARIH DOGRULAMA: kutunun kalkis tarihi sorgu tarihiyle ayni olmali
+        if query_date is not None:
+            bdd = box_departure_date(text, query_date.year)
+            if bdd is not None and bdd != query_date:
+                mismatch.append(f"{flight}@{bdd.isoformat()}")
+                continue
 
         cabin = detect_cabin(text)
         if not cabin:
@@ -209,6 +237,8 @@ def parse_fares(html: str):
         # Ayni ucus+sinif icin en dusuk fiyati tut (orn. promo eko vs esnek eko)
         if prev is None or price < prev["price"]:
             result[key] = {"price": price, "dep": dep, "arr": arr, "seats": seats}
+    if mismatch:
+        log(f"  [{query_date}] tarih-uyumsuz {len(mismatch)} kutu ELENDI (hayalet oneri?): {mismatch[:5]}")
     return result
 
 
@@ -273,7 +303,7 @@ def fetch_date(d: date):
                     log(f"  [{d}] Beklenmeyen sayfa (yonlendirme/engelleme?)")
                 time.sleep(1.5)
                 continue
-            fares = parse_fares(html)
+            fares = parse_fares(html, d)
             if fares:
                 return "ok", fares
             # Gecerli sayfa ama fare yok -> gercekten bos
