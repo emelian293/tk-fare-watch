@@ -1,5 +1,5 @@
 {
-  "collapse_warned": true,
+  "collapse_warned": false,
   "dates_has_any": {
     "2026-08-05": false,
     "2026-08-06": false,
@@ -193,5 +193,5 @@
   "last_summary_date": "2026-08-09",
   "misses": {},
   "started": true,
-  "zero_streak": 4
+  "zero_streak": 0
 }
