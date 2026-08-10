@@ -9,6 +9,10 @@ on:
         description: "Mevcut tum biletlerin tam listesini hemen Telegram'a gonder"
         type: boolean
         default: true
+      check:
+        description: "Sadece musteri tablosu kurulumunu dogrula (tarama yapma)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write             # state.json'u repoya geri commit'lemek icin
@@ -38,7 +42,12 @@ jobs:
           # Musteri eslestirme (opsiyonel — yoksa sistem normal calisir)
           CUSTOMERS_SHEET_ID: ${{ secrets.CUSTOMERS_SHEET_ID }}
           GOOGLE_SA_JSON:     ${{ secrets.GOOGLE_SA_JSON }}
-        run: python fare_watch.py ${{ github.event.inputs.report == 'true' && '--report' || '' }}
+        run: |
+          if [ "${{ github.event.inputs.check }}" = "true" ]; then
+            python fare_watch.py --check-customers
+          else
+            python fare_watch.py ${{ github.event.inputs.report == 'true' && '--report' || '' }}
+          fi
 
       - name: Durumu kaydet (state.json)
         run: |

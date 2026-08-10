@@ -448,6 +448,35 @@ def _chunks(text, size):
     return parts
 
 
+def check_customers(dry=False):
+    """
+    Kurulum dogrulama: Sheets okunuyor mu, kriterler dogru mu?
+    Actions loglari PUBLIC oldugu icin loga SADECE sayilar yazilir;
+    isim/kriter detayi yalnizca Telegram'a (sahibe) gider.
+    """
+    import customers as cust
+    people = cust.load_customers(log=log)
+    if not people:
+        log("SONUC: 0 musteri okundu. (Sheets kurulumu eksik ya da kriter sutunlari bos)")
+        tg_send("⚠️ <b>Müşteri tablosu okunamadı</b> ya da geçerli satır yok.\n"
+                "Kontrol: tablo servis hesabına paylaşıldı mı? Başlıklar ve "
+                "<b>Başlangıç/Bitiş Tarihi</b> dolu mu?", dry=dry, parse_mode="HTML")
+        return
+    log(f"SONUC: {len(people)} musteri okundu, kriterler gecerli. (detay Telegram'a gonderildi)")
+    lines = [f"✅ <b>Müşteri tablosu okundu</b> — {len(people)} kayıt\n"]
+    for c in people:
+        ad = f"{c.get('ad','')} {c.get('soyad','')}".strip()
+        cab = c["cabin"] or "Hepsi"
+        eksik = [k for k, v in (("pasaport", c.get("pasaport")), ("doğum", c.get("dogum")),
+                                ("telefon", c.get("telefon")), ("e-posta", c.get("eposta")))
+                 if not v]
+        lines.append(f"• <b>{_esc(ad)}</b> — {c['bas'].strftime('%d.%m.%Y')}–"
+                     f"{c['bit'].strftime('%d.%m.%Y')} · {cab}"
+                     + (f"\n   ⚠️ eksik: {', '.join(eksik)}" if eksik else ""))
+    lines.append("\nEşleşen bilet çıktığında bildirim gelecek.")
+    tg_send("\n".join(lines), dry=dry, parse_mode="HTML")
+
+
 def notify_customers(new_avail, st, dry=False):
     """
     Yeni biletleri Sheets'teki musteri kriterleriyle eslestirip SAHIBE bildirir.
@@ -482,7 +511,13 @@ def notify_customers(new_avail, st, dry=False):
 
 
 def _norm_name(c):
-    return f"{c.get('ad','')}{c.get('soyad','')}".strip().lower()
+    """
+    Musteri kimligini KISA HASH'e cevirir. state.json public repoya commit edildigi
+    icin oraya isim yazilmaz; sadece tekrar-bildirimi engelleyecek kadar kimlik tutulur.
+    """
+    import hashlib
+    raw = f"{c.get('ad','')}|{c.get('soyad','')}|{c.get('pasaport','')}".strip().lower()
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
 
 
 def _customer_message(c, d, cab, info):
@@ -917,7 +952,14 @@ def main():
     ap.add_argument("--date", type=str, default=None, help="Tek tarih debug (GG.AA.YYYY)")
     ap.add_argument("--report", action="store_true",
                     help="Bu calismada mevcut tum biletlerin tam listesini gonder")
+    ap.add_argument("--check-customers", action="store_true",
+                    help="Musteri tablosu kurulumunu dogrula (detay Telegram'a)")
     args = ap.parse_args()
+
+    if args.check_customers:
+        log("Musteri tablosu kontrol ediliyor...")
+        check_customers(dry=args.dry_run)
+        return
 
     if args.test_alert:
         ok = tg_send("🔔 TK Fare-Watch test mesaji - kurulum calisiyor.")
