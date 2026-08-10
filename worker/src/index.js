@@ -81,6 +81,31 @@ export default {
   },
 };
 
+async function triggerCheck(env) {
+  /* Musteri raporunu GitHub'da uretip Telegram'a yollatir.
+     Rapor kisisel veri icerdigi icin Worker/KV'de SAKLANMAZ; dogrudan sahibe gider. */
+  if (!env.GH_TOKEN) return false;
+  const owner = env.GH_OWNER || "emelian293";
+  const repo = env.GH_REPO || "tk-fare-watch";
+  const wf = env.GH_WORKFLOW || "watch.yml";
+  try {
+    const r = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${wf}/dispatches`,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${env.GH_TOKEN}`,
+          "Accept": "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+          "User-Agent": "tk-fare-bot",
+        },
+        body: JSON.stringify({ ref: "main", inputs: { check: "true", report: "false" } }),
+      });
+    return r.ok;
+  } catch (_) { return false; }
+}
+
+
 async function triggerScan(env) {
   if (!env.GH_TOKEN) return; // token yoksa sessizce gec
   const owner = env.GH_OWNER || "emelian293";
@@ -162,6 +187,13 @@ async function route(env, msg) {
       return cmdRevoke(env, chatId, id);
     if (["kullanicilar", "kullanici", "liste", "users"].includes(cmd))
       return cmdList(env, chatId);
+    // Musteri raporu: kriterler + su an uyan biletler (yalniz sahip)
+    if (["musteri", "musteriler", "musterilerim"].includes(cmd)) {
+      const ok = await triggerCheck(env);
+      return send(env, chatId, ok
+        ? "⏳ <b>Müşteri raporu hazırlanıyor…</b>\nGüncel biletlerle birlikte ~1 dk içinde gelecek."
+        : "⚠️ Rapor tetiklenemedi (GitHub bağlantısı).", "HTML");
+    }
     if (["ayarlar", "ayar", "settings"].includes(cmd))
       return cmdSettings(env, chatId);
     if (cmd === "business")
@@ -480,6 +512,7 @@ function helpText(isOwner) {
     "🟢 yeni bilet / 🔻 fiyat düşüşü olunca ayrıca otomatik haber gelir.";
   if (isOwner)
     t += "\n\n<b>Yönetici komutları</b>\n" +
+      "<code>müşteri</code> — müşteri kriterleri + şu an uyan biletler\n" +
       "<code>/ayarlar</code> — bildirim ayarları\n" +
       "<code>/business eylül</code> — Business yeni bilet ayı\n" +
       "<code>/izinver &lt;id&gt; [ad]</code> — erişim ver\n" +
