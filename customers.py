@@ -123,6 +123,10 @@ def load_customers(log=print):
         bit = _parse_date(col(row, "bitistarihi", "bitis", "sontarih"))
         if not (bas and bit):
             tarihsiz += 1
+            if "ornek_tarih" not in LAST_DIAG:   # tani: ham deger (tarih PII degil)
+                LAST_DIAG["ornek_tarih"] = [
+                    col(row, "baslangictarihi", "baslangic", "ilktarih"),
+                    col(row, "bitistarihi", "bitis", "sontarih")]
             continue    # kriter yoksa eslestirilemez
         out.append({
             "ad":       col(row, "ad", "isim", "adi"),
