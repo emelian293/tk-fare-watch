@@ -51,6 +51,10 @@ COLLAPSE_MIN = 5                    # saglikli tarama esigi (baseline + tam-cokm
 DISAPPEAR_AFTER = 3                 # bir tarih kac ardisik BOS taramadan sonra gercekten silinsin
                                     # (site cirpinmasinda yanlis "yeni bilet" uyarisini onler)
 ZERO_WARN = 4                       # tarama kac ardisik kez TAM 0 bulursa (~20 dk) uyari at
+EMPTY_VERIFY = 3                    # ONCEDEN DOLU bir tarih icin "bos" sonucu kac kez dogrulansin
+                                    # (site veri-merkezi IP'lerine bazen bos sayfa servis ediyor)
+OUTAGE_RATIO = 0.5                  # tarama, bilinen dolu tarihlerin bu oraninin altina duserse
+                                    # tarama GUVENILMEZ say -> veriyi dondur (yanlis bosalmayi onle)
 REQUEST_TIMEOUT = 20                # her istek zaman asimi (sn)
 FETCH_RETRIES = 3                   # basarisiz istekte tekrar sayisi
 # Telegram bilgileri ORTAM DEGISKENINDEN gelir (kodda tutma!)
@@ -280,38 +284,48 @@ def _notify_new(cabin, d, cfg):
     return bool(nt.get(cabin, False))   # Ekonomi/Premium -> True ise her ay
 
 
-def fetch_date(d: date):
+def _fetch_once(d: date):
+    """Tek deneme -> ('ok', fares) | ('empty', {}) | ('fail', None)."""
+    try:
+        r = http_get(search_url(d))
+        if r.status_code != 200:
+            return "fail", None
+        html = r.text
+        low = _strip_tr(html.lower())   # TR karakterleri normalize (i/ı, ç/c ...)
+        if not (("siralama" in low) or ("toplam" in low and "sonuc" in low)):
+            return "fail", None         # yonlendirme/engelleme sayfasi
+        fares = parse_fares(html, d)
+        return ("ok", fares) if fares else ("empty", {})
+    except Exception:
+        return "fail", None
+
+
+def fetch_date(d: date, verify_empty=False):
     """
     Donus: ('ok', fares_dict) | ('empty', {}) | ('fail', None)
-    'fail' = ag/HTTP hatasi ya da beklenmeyen sayfa -> state DEGISTIRILMEZ.
-    Thread-guvenli (her cagri kendi istegini yapar).
+    'fail' -> dogrulanamadi, state/gosterim DEGISTIRILMEZ.
+
+    ONEMLI: Site zaman zaman GECERLI ama BOS sonuc sayfasi servis ediyor
+    (ozellikle veri-merkezi IP'lerine; sessiz bot-engelleme). Tek bir bos yanit
+    "bilet tukendi" sanilirsa liste yanlis boşalir. Bu yuzden tarih ONCEDEN DOLU
+    biliniyorsa (verify_empty=True) bos yanit ANINDA kabul edilmez: ust uste
+    EMPTY_VERIFY kez bos gelmesi gerekir.
     """
-    url = search_url(d)
-    for attempt in range(1, FETCH_RETRIES + 1):
-        try:
-            r = http_get(url)
-            if r.status_code != 200:
-                if attempt == FETCH_RETRIES:
-                    log(f"  [{d}] HTTP {r.status_code} (son deneme)")
-                time.sleep(1.5)
-                continue
-            html = r.text
-            low = _strip_tr(html.lower())   # TR karakterleri normalize (i/ı, ç/c ...)
-            valid_page = ("siralama" in low) or ("toplam" in low and "sonuc" in low)
-            if not valid_page:
-                if attempt == FETCH_RETRIES:
-                    log(f"  [{d}] Beklenmeyen sayfa (yonlendirme/engelleme?)")
-                time.sleep(1.5)
-                continue
-            fares = parse_fares(html, d)
-            if fares:
-                return "ok", fares
-            # Gecerli sayfa ama fare yok -> gercekten bos
-            return "empty", {}
-        except Exception as e:
-            if attempt == FETCH_RETRIES:
-                log(f"  [{d}] fetch hata: {e}")
-            time.sleep(1.5)
+    need_empty = EMPTY_VERIFY if verify_empty else 1
+    tries = FETCH_RETRIES + (need_empty - 1)
+    empty_hits = 0
+    for i in range(tries):
+        s, f = _fetch_once(d)
+        if s == "ok":
+            return "ok", f
+        if s == "empty":
+            empty_hits += 1
+            if empty_hits >= need_empty:
+                return "empty", {}
+        time.sleep(1.2)
+    if empty_hits:
+        return "empty", {}
+    log(f"  [{d}] dogrulanamadi ({tries} deneme) - eski veri korunuyor")
     return "fail", None
 
 
@@ -468,7 +482,9 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
     log(f"{len(dates)} tarih {MAX_WORKERS} paralel istekle taraniyor ({engine})...")
     results = {}
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futs = {ex.submit(fetch_date, d): d for d in dates}
+        # Onceden DOLU bilinen tarihlerde "bos" sonucu dogrula (yanlis bosalmayi onler)
+        futs = {ex.submit(fetch_date, d,
+                          bool(st["dates_has_any"].get(d.isoformat()))): d for d in dates}
         for fu in as_completed(futs):
             dd = futs[fu]
             try:
@@ -493,14 +509,19 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
 
     log(f"Tarama bitti: {scanned_ok}/{len(dates)} basarili, ham {scan_found} tarihte bilet.")
 
-    # --- TAM COKME (outage): onceden saglikli, tarama TAM 0 -> state DONDUR (mutasyon yok) ---
-    if (not baseline) and scanned_ok > 0 and scan_found == 0 and prev_total >= COLLAPSE_MIN:
+    # --- GUVENILMEZ TARAMA (outage / sessiz engelleme): veriyi DONDUR (mutasyon yok) ---
+    # Sadece "tam 0" degil, ANI BUYUK DUSUS de guvenilmezdir: site bos sayfa servis
+    # ediyorsa liste yanlis bosalmasin. Gercek tukenmeler tek tek olur, toptan degil.
+    if (not baseline) and scanned_ok > 0 and prev_total >= COLLAPSE_MIN \
+            and scan_found < prev_total * OUTAGE_RATIO:
         st["zero_streak"] = st.get("zero_streak", 0) + 1
-        log(f"!! Tam cokme: tarama 0 bilet (onceden {prev_total}). State donduruldu (streak={st['zero_streak']}).")
+        log(f"!! Guvenilmez tarama: {scan_found} bilet (onceden {prev_total}). "
+            f"Veri donduruldu (streak={st['zero_streak']}).")
         if st["zero_streak"] >= ZERO_WARN and not st.get("collapse_warned"):
             st["collapse_warned"] = True
-            tg_send(f"⚠️ Site ~{ZERO_WARN*5} dakikadır hiç bilet döndürmüyor "
-                    f"(olası geçici site sorunu). Veriler korundu.", dry=dry)
+            tg_send(f"⚠️ Site ~{ZERO_WARN*5} dakikadır güvenilir sonuç döndürmüyor "
+                    f"(olası geçici site sorunu). Liste dondurulduğu için "
+                    f"gösterilen veriler bir miktar eski olabilir.", dry=dry)
         if not dry:
             save_state(st)
         return
