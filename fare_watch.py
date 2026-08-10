@@ -81,7 +81,7 @@ LOG_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.log"
 USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-GUN_ADI  = ["Pazartesi", "Sali", "Carsamba", "Persembe", "Cuma", "Cumartesi", "Pazar"]
+GUN_ADI  = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
 GUN_KISA = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"]   # Cuma/Cumartesi ayrimi
 AY_ADI   = ["", "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
             "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"]
@@ -477,31 +477,14 @@ def check_customers(dry=False):
         return
     log(f"SONUC: {len(people)} musteri okundu, kriterler gecerli. (detay Telegram'a gonderildi)")
     board = current_board()      # su an satista olanlar (latest.json)
-    lines = [f"✅ <b>Müşteri tablosu okundu</b> — {len(people)} kayıt\n"]
+    # Her musteri icin AYRI, tam aksiyon mesaji (yolcu bilgileri + linkli biletler)
     for c in people:
-        ad = f"{c.get('ad','')} {c.get('soyad','')}".strip()
-        cab = c["cabin"] or "Hepsi"
-        eksik = [k for k, v in (("pasaport", c.get("pasaport")), ("doğum", c.get("dogum")),
-                                ("telefon", c.get("telefon")), ("e-posta", c.get("eposta")))
-                 if not v]
-        lines.append(f"• <b>{_esc(ad)}</b> — {c['bas'].strftime('%d.%m.%Y')}–"
-                     f"{c['bit'].strftime('%d.%m.%Y')} · {cab}"
-                     + (f"\n   ⚠️ eksik: {', '.join(eksik)}" if eksik else ""))
-        # Su an kriterine UYAN biletler
         hits = [(d, cb, inf) for d, cb, inf in board
                 if c["bas"] <= d <= c["bit"] and (not c["cabin"] or c["cabin"] == cb)]
-        if not hits:
-            lines.append("   şu an uyan bilet yok")
-            continue
-        ucuz = min(h[2]["price"] for h in hits)
-        lines.append(f"   🎫 şu an <b>{len(hits)}</b> uygun bilet · en ucuz <b>{ucuz:.0f}$</b>")
-        for d, cb, inf in sorted(hits, key=lambda h: (h[2]["price"], h[0]))[:5]:
-            seat = f" · son {inf['seats']} koltuk" if inf.get("seats") else ""
-            lines.append(f"   · {_gun_baslik(d)} — {cb} {inf['price']:.0f}${seat}")
-        if len(hits) > 5:
-            lines.append(f"   · … +{len(hits)-5} tane daha")
-    lines.append("\n<i>Bundan sonra sadece YENİ çıkan biletlerde bildirim gelir.</i>")
-    tg_send("\n".join(lines), dry=dry, parse_mode="HTML")
+        tg_send(_customer_report_message(c, hits), dry=dry, parse_mode="HTML")
+    tg_send(f"✅ {len(people)} müşteri kontrol edildi.\n"
+            "<i>Bundan sonra sadece YENİ çıkan biletlerde otomatik bildirim gelir.</i>",
+            dry=dry, parse_mode="HTML")
 
 
 def current_board():
@@ -568,29 +551,62 @@ def _norm_name(c):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
 
 
-def _customer_message(c, d, cab, info):
-    """Dokun-kopyala formatinda musteri bildirimi (KART BILGISI YOK)."""
-    def row(label, val):
-        return f"{label} <code>{_esc(val)}</code>" if val else ""
-    seats = info.get("seats")
-    lines = [
-        f"🎯 <b>{_esc((c.get('ad','') + ' ' + c.get('soyad','')).strip())}</b> için uygun bilet!",
-        f"{_gun_baslik(d)} · {cab} · <b>{info['price']:.0f}$</b>"
-        + (f" · son {seats} koltuk" if seats else ""),
-        "",
-        "<b>Yolcu bilgileri</b> — değere dokun, kopyalanır:",
-    ]
+def _pax_block(c):
+    """Yolcu bilgileri, dokun-kopyala (<code>) formatinda. KART BILGISI YOK."""
+    lines = ["<b>Yolcu bilgileri</b> — değere dokun, kopyalanır:"]
     for lbl, val in (("Ad", c.get("ad")), ("Soyad", c.get("soyad")),
                      ("Cinsiyet", c.get("cinsiyet")), ("Doğum", c.get("dogum")),
                      ("Pasaport", c.get("pasaport")),
                      ("Pas. bitiş", c.get("pasaport_bitis")),
                      ("Uyruk", c.get("uyruk")), ("Telefon", c.get("telefon")),
                      ("E-posta", c.get("eposta"))):
-        r = row(lbl, val)
-        if r:
-            lines.append(r)
-    lines += ["", f'▶️ <a href="{search_url(d)}">Bileti aç</a> → Seç → Devam Et',
-              "💳 Kartı telefonun kendi otomatik doldurmasıyla gir; SATIN AL'a sen bas."]
+        if val:
+            lines.append(f"{lbl} <code>{_esc(val)}</code>")
+    return lines
+
+
+_KART_NOTU = "💳 Kartı telefonun kendi otomatik doldurmasıyla gir; SATIN AL'a sen bas."
+
+
+def _customer_message(c, d, cab, info):
+    """Yeni bilet -> tek bilet icin tam aksiyon mesaji."""
+    seats = info.get("seats")
+    lines = [
+        f"🎯 <b>{_esc((c.get('ad','') + ' ' + c.get('soyad','')).strip())}</b> için uygun bilet!",
+        f"{_gun_baslik(d)} · {cab} · <b>{info['price']:.0f}$</b>"
+        + (f" · son {seats} koltuk" if seats else ""),
+        "",
+    ] + _pax_block(c) + [
+        "", f'▶️ <a href="{search_url(d)}">Bileti aç</a> → Seç → Devam Et', _KART_NOTU]
+    return "\n".join(lines)
+
+
+def _customer_report_message(c, hits, limit=8):
+    """Musteri raporu -> yolcu bilgileri + su an uyan biletler (her biri linkli)."""
+    ad = f"{c.get('ad','')} {c.get('soyad','')}".strip()
+    cab = c["cabin"] or "Hepsi"
+    head = (f"🎯 <b>{_esc(ad)}</b>\n"
+            f"Kriter: {c['bas'].strftime('%d.%m.%Y')}–{c['bit'].strftime('%d.%m.%Y')} · {cab}")
+    if not hits:
+        return head + "\n\n📭 Şu an kriterine uyan bilet yok."
+    ucuz = min(h[2]["price"] for h in hits)
+    lines = [head + f"\n🎫 <b>{len(hits)}</b> uygun bilet · en ucuz <b>{ucuz:.0f}$</b>", ""]
+    lines += _pax_block(c)
+    eksik = [k for k, v in (("pasaport", c.get("pasaport")), ("doğum", c.get("dogum")),
+                            ("telefon", c.get("telefon")), ("e-posta", c.get("eposta")))
+             if not v]
+    if eksik:
+        lines.append(f"⚠️ <i>Tabloda eksik: {', '.join(eksik)}</i>")
+    lines += ["", "<b>En uygun biletler</b> (ucuzdan):"]
+    for d, cb, info in sorted(hits,
+                              key=lambda h: (h[2]["price"], h[0], h[2].get("dep") or ""))[:limit]:
+        seat = f" · son {info['seats']} koltuk" if info.get("seats") else ""
+        saat = f" {info['dep']}" if info.get("dep") else ""
+        lines.append(f'· {_gun_baslik(d)}{saat} — {cb} <b>{info["price"]:.0f}$</b>{seat}\n'
+                     f'  <a href="{search_url(d)}">Bileti aç</a>')
+    if len(hits) > limit:
+        lines.append(f"<i>… +{len(hits)-limit} bilet daha (tümü için: ekonomi / business)</i>")
+    lines += ["", _KART_NOTU]
     return "\n".join(lines)
 
 
