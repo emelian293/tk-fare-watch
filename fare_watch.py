@@ -456,11 +456,24 @@ def check_customers(dry=False):
     """
     import customers as cust
     people = cust.load_customers(log=log)
+    d = cust.LAST_DIAG
     if not people:
-        log("SONUC: 0 musteri okundu. (Sheets kurulumu eksik ya da kriter sutunlari bos)")
-        tg_send("⚠️ <b>Müşteri tablosu okunamadı</b> ya da geçerli satır yok.\n"
-                "Kontrol: tablo servis hesabına paylaşıldı mı? Başlıklar ve "
-                "<b>Başlangıç/Bitiş Tarihi</b> dolu mu?", dry=dry, parse_mode="HTML")
+        # Basliklar ve sayilar kisisel veri degil -> loga yazilabilir (tani icin sart)
+        log(f"SONUC: 0 gecerli musteri. TANI: {d if d else 'Sheets hic okunamadi (yetki/ID?)'}")
+        msg = ["⚠️ <b>Geçerli müşteri satırı bulunamadı</b>\n"]
+        if not d:
+            msg.append("Tabloya <b>hiç erişilemedi</b>. Muhtemel sebep:\n"
+                       "• Tablo servis hesabına paylaşılmadı\n• Yanlış tablo kimliği")
+        else:
+            msg.append(f"Okunan satır: <b>{d.get('satir', 0)}</b>")
+            if d.get("basliklar"):
+                msg.append("Bulunan başlıklar:\n<code>"
+                           + _esc(" | ".join(str(x) for x in d["basliklar"])) + "</code>")
+            if d.get("neden"):
+                msg.append(f"Sebep: <b>{_esc(d['neden'])}</b>")
+            msg.append("\nGerekli: <b>Başlangıç Tarihi</b> ve <b>Bitiş Tarihi</b> "
+                       "sütunları dolu olmalı (örn. <code>25.09.2026</code>).")
+        tg_send("\n".join(msg), dry=dry, parse_mode="HTML")
         return
     log(f"SONUC: {len(people)} musteri okundu, kriterler gecerli. (detay Telegram'a gonderildi)")
     lines = [f"✅ <b>Müşteri tablosu okundu</b> — {len(people)} kayıt\n"]

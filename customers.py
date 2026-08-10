@@ -27,6 +27,9 @@ SA_JSON = os.environ.get("GOOGLE_SA_JSON", "").strip()
 # Kart sutunlari: OKUNMAZ. Guvenlik icin acikca disarida birakilir.
 BLOCKED = ("kart", "card", "cvv", "cvc", "sonkullanma", "sonkullanim", "expiry", "expire")
 
+# Kurulum tanisi (kisisel veri TUTMAZ: sadece sayilar ve sutun basliklari)
+LAST_DIAG = {}
+
 
 def _norm(s):
     """Baslik/deger normalize: kucuk harf, TR karakterler sade, bosluksuz."""
@@ -91,9 +94,12 @@ def load_customers(log=print):
         log(f"Sheets hatasi ({type(e).__name__}) - musteri eslestirme atlandi.")
         return []
 
+    LAST_DIAG["satir"] = len(rows)
     if len(rows) < 2:
+        LAST_DIAG["neden"] = "Sekmede veri yok (yalnizca baslik ya da bos)."
         return []
     head = [_norm(h) for h in rows[0]]
+    LAST_DIAG["basliklar"] = list(rows[0])
 
     def col(row, *names):
         for nm in names:
@@ -104,15 +110,19 @@ def load_customers(log=print):
         return ""
 
     out = []
+    bos_satir = pasif = tarihsiz = 0
     for row in rows[1:]:
         if not any(str(c).strip() for c in row):
+            bos_satir += 1
             continue
         aktif = _norm(col(row, "aktif", "durum"))
         if aktif in ("hayir", "pasif", "kapali", "no", "0", "false"):
+            pasif += 1
             continue
         bas = _parse_date(col(row, "baslangictarihi", "baslangic", "ilktarih"))
         bit = _parse_date(col(row, "bitistarihi", "bitis", "sontarih"))
         if not (bas and bit):
+            tarihsiz += 1
             continue    # kriter yoksa eslestirilemez
         out.append({
             "ad":       col(row, "ad", "isim", "adi"),
@@ -127,6 +137,12 @@ def load_customers(log=print):
             "bas": bas, "bit": bit,
             "cabin": _cabin_of(col(row, "biletturu", "bilettipi", "sinif")),
         })
+    LAST_DIAG.update({"gecerli": len(out), "bos_satir": bos_satir,
+                      "pasif": pasif, "tarihsiz": tarihsiz})
+    if not out:
+        LAST_DIAG["neden"] = (
+            f"{tarihsiz} satirda Baslangic/Bitis Tarihi okunamadi"
+            if tarihsiz else (f"{pasif} satir 'Aktif' degil" if pasif else "veri satiri yok"))
     return out
 
 
