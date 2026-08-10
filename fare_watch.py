@@ -763,7 +763,8 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
         return
 
     # --- NORMAL: per-tarih debounce + degisiklik tespiti ---
-    new_avail = []
+    new_avail = []            # genel bildirim (kuresel ayarlara tabi)
+    new_for_customers = []    # musteri eslestirmesi (kisiye ozel kriter belirler)
     price_drop = []
     for d in dates:
         diso = d.isoformat()
@@ -791,14 +792,20 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
 
         # Dolu tarih
         st["misses"].pop(diso, None)
-        new_here = {}
+        new_here = {}       # genel bildirim: kuresel /ayarlar kurallarina TABI
+        new_raw = {}        # musteri eslestirmesi: TUM yeni tarifeler (kriter kisiye ozel)
         for k, info in fares.items():
             _fl, cab = k.split("|")
             is_new = (not prev_has) or (k not in prev_fares)
-            if is_new and _notify_new(cab, d, cfg):
+            if not is_new:
+                continue
+            new_raw[k] = info
+            if _notify_new(cab, d, cfg):
                 new_here[k] = info
         if new_here:
             new_avail.append((d, new_here))
+        if new_raw:
+            new_for_customers.append((d, new_raw))
         for k, info in fares.items():
             _fl, cab = k.split("|")
             if k in prev_fares and info["price"] < prev_fares[k] and cfg["price_drop"].get(cab, True):
@@ -815,7 +822,9 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
     # --- Bildirimler: yeni bilet + fiyat dususu -> YETKILI HERKESE (broadcast) ---
     if new_avail:
         broadcast(_new_avail_message(new_avail), parse_mode="HTML", dry=dry)
-        notify_customers(new_avail, st, dry=dry)   # kriterle eslesen musteriler (sadece sahibe)
+    if new_for_customers:
+        # Musteri kriteri kisiye ozeldir: kuresel sinif/ay filtresinden BAGIMSIZ calisir
+        notify_customers(new_for_customers, st, dry=dry)   # yalnizca sahibe
     if price_drop:
         broadcast(_price_drop_message(price_drop), parse_mode="HTML", dry=dry)
     if not new_avail and not price_drop:
