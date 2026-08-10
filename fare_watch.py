@@ -48,7 +48,7 @@ DATE_START  = date(2026, 8, 1)      # izleme penceresi baslangici (gecmis gunler
 DATE_END    = date(2026, 10, 31)    # izleme penceresi sonu
 MAX_WORKERS = 6                     # es zamanli istek sayisi (paralel tarama)
 COLLAPSE_MIN = 5                    # saglikli tarama esigi (baseline + tam-cokme algisi)
-DISAPPEAR_AFTER = 3                 # bir tarih kac ardisik BOS taramadan sonra gercekten silinsin
+DISAPPEAR_AFTER = 1                 # bos DOGRULANDIKTAN sonra kac tarama beklensin (EMPTY_VERIFY zaten 3 kez dogruluyor)
                                     # (site cirpinmasinda yanlis "yeni bilet" uyarisini onler)
 ZERO_WARN = 4                       # tarama kac ardisik kez TAM 0 bulursa (~20 dk) uyari at
 EMPTY_VERIFY = 3                    # ONCEDEN DOLU bir tarih icin "bos" sonucu kac kez dogrulansin
@@ -541,7 +541,7 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
                     st["fares"][f"{diso}|{k}"] = info["price"]
                 st["dates_has_any"][diso] = True
         if not dry:
-            write_latest(results)
+            write_latest(results, st)
         for pm, m in full_report_messages(
                 results, "✅ TK Fare-Watch senkronize edildi — mevcut biletler (ASB→İstanbul)", cheapest):
             tg_send(m, dry=dry, parse_mode=pm)
@@ -598,7 +598,7 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
         st["dates_has_any"][diso] = True
 
     if not dry:
-        write_latest(results)
+        write_latest(results, st)
         send_heartbeat(scan_found)   # "son kontrol" damgasi (veri degismese de tazelik belli olsun)
 
     # --- Bildirimler: yeni bilet + fiyat dususu -> YETKILI HERKESE (broadcast) ---
@@ -726,7 +726,7 @@ def daily_brief_message(results, cheapest):
             "\n\nDetay için bota ay adı yaz (ör. <b>eylül</b>) ya da <b>tümü</b>.")
 
 
-def write_latest(results):
+def write_latest(results, st):
     """
     latest.json = BOTUN GOSTERDIGI veri. Ilke: gosterimde GERCEK oncelikli.
       - 'ok'    -> o tarih guncel tarifelerle DEGISTIRILIR (fiyat/koltuk dahil)
@@ -765,6 +765,23 @@ def write_latest(results):
 
     valid = {d.isoformat() for d in monitored_dates()}
     board = {k: v for k, v in board.items() if k in valid}   # gecmis/aralik disi temizle
+
+    # --- TEK KAYNAK: tablo, state.json'in birebir yansimasi olmali ---
+    # Bildirimler state'e bakar; tablo da ayni gercegi gostersin diye state'te
+    # olmayan hicbir tarih/tarife tabloda kalamaz (hayalet kayit birikmesin).
+    allowed = set()
+    for k in st["fares"]:
+        diso, fl, cab = k.split("|")
+        allowed.add((diso, fl, cabin_letter(cab)))
+    for diso in list(board):
+        if not st["dates_has_any"].get(diso):
+            board.pop(diso)                      # state "yok" diyorsa tabloda da yok
+            continue
+        kept = [e for e in board[diso] if (diso, e.get("fl"), e.get("c")) in allowed]
+        if kept:
+            board[diso] = kept
+        else:
+            board.pop(diso)
 
     changed = board != prev
     data = {"updated": (datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
