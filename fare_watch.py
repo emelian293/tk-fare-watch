@@ -389,6 +389,22 @@ def _chunks(text, size):
     return parts
 
 
+def send_heartbeat(found, dry=False):
+    """
+    'Son kontrol' bilgisini Worker'a (KV) yaz. Boylece bot, veri degismemis olsa bile
+    "son kontrol: 2 dk once" diyebilir -> kullanici listenin taze mi bayat mi oldugunu bilir.
+    Git commit'i gerektirmez (her 5 dk commit spam'i olmasin diye).
+    """
+    if dry or not (WORKER_BASE and BROADCAST_SECRET):
+        return
+    try:
+        kw = {"impersonate": _IMPERSONATE} if _IMPERSONATE else {}
+        httpx.post(WORKER_BASE.rstrip("/") + "/heartbeat",
+                   json={"secret": BROADCAST_SECRET, "found": found}, timeout=15, **kw)
+    except Exception as e:
+        log(f"heartbeat gonderilemedi: {e}")
+
+
 def broadcast(text, parse_mode=None, dry=False):
     """Yeni bilet / fiyat dususu -> yetkili TUM kullanicilara (owner + KV izinliler).
     Worker'in /broadcast ucuna gonderir; basarisizsa sadece owner'a duser."""
@@ -504,7 +520,7 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
                     st["fares"][f"{diso}|{k}"] = info["price"]
                 st["dates_has_any"][diso] = True
         if not dry:
-            write_latest(results, st)
+            write_latest(results)
         for pm, m in full_report_messages(
                 results, "✅ TK Fare-Watch senkronize edildi — mevcut biletler (ASB→İstanbul)", cheapest):
             tg_send(m, dry=dry, parse_mode=pm)
@@ -561,7 +577,8 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
         st["dates_has_any"][diso] = True
 
     if not dry:
-        write_latest(results, st)
+        write_latest(results)
+        send_heartbeat(scan_found)   # "son kontrol" damgasi (veri degismese de tazelik belli olsun)
 
     # --- Bildirimler: yeni bilet + fiyat dususu -> YETKILI HERKESE (broadcast) ---
     if new_avail:
@@ -688,21 +705,29 @@ def daily_brief_message(results, cheapest):
             "\n\nDetay için bota ay adı yaz (ör. <b>eylül</b>) ya da <b>tümü</b>.")
 
 
-def write_latest(results, st):
+def write_latest(results):
     """
-    Worker'in okuyacagi tam veri -> latest.json. BIRLESTIRMELI:
-    - taze veri gelen tarih guncellenir,
-    - gercekten silinen (debounce sonrasi has_any=False) tarih cikarilir,
-    - gecici bos (debounce ile korunan) / fail tarih icin ESKI kayit korunur.
-    Boylece site cirpinsa da bot listesi sabit kalir.
+    latest.json = BOTUN GOSTERDIGI veri. Ilke: gosterimde GERCEK oncelikli.
+      - 'ok'    -> o tarih guncel tarifelerle DEGISTIRILIR (fiyat/koltuk dahil)
+      - 'empty' -> HEMEN kaldirilir. state.json'daki debounce'tan BAGIMSIZ:
+                   satista yoksa botun listesinde de gorunmemeli (tukenen bilet kalmasin).
+      - 'fail'  -> dogrulanamadi (ag/HTTP), eski kayit KORUNUR.
+    Bu fonksiyon yalnizca SAGLIKLI taramada cagrilir (tam cokme korumasi once doner).
+
+    Icerik degismediyse 'updated' damgasi degistirilmez -> dosya bayt-ayni kalir
+    -> bos commit olmaz, ama gercek her degisiklik aninda yayinlanir.
     """
-    board = {}
+    prev, prev_updated = {}, None
     if os.path.exists(LATEST_FILE):
         try:
             with open(LATEST_FILE, encoding="utf-8") as fp:
-                board = (json.load(fp) or {}).get("dates", {}) or {}
+                old = json.load(fp) or {}
+            prev = old.get("dates", {}) or {}
+            prev_updated = old.get("updated")
         except Exception:
-            board = {}
+            prev, prev_updated = {}, None
+
+    board = dict(prev)
     for d, (s, f) in results.items():
         diso = d.isoformat()
         if s == "ok" and f:
@@ -713,16 +738,22 @@ def write_latest(results, st):
                             "p": info["price"], "s": info.get("seats"), "fl": fl})
             arr.sort(key=lambda x: (x["t"] or "", x["c"]))
             board[diso] = arr
-        elif s == "empty" and not st["dates_has_any"].get(diso):
-            board.pop(diso, None)   # gercekten gitti (debounce sonrasi)
-        # else: debounce-kept / fail -> eski kaydi KORU
+        elif s == "empty":
+            board.pop(diso, None)   # satista yok -> gosterimden HEMEN cik
+        # 'fail' -> dogrulanamadi, eski kaydi koru
+
     valid = {d.isoformat() for d in monitored_dates()}
     board = {k: v for k, v in board.items() if k in valid}   # gecmis/aralik disi temizle
-    data = {"updated": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+
+    changed = board != prev
+    data = {"updated": (datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+                        if (changed or not prev_updated) else prev_updated),
             "range": f"{max(date.today(), DATE_START).isoformat()}..{DATE_END.isoformat()}",
             "dates": board}
     with open(LATEST_FILE, "w", encoding="utf-8") as fp:
         json.dump(data, fp, ensure_ascii=False, indent=1, sort_keys=True)
+    if changed:
+        log("latest.json guncellendi (gosterim verisi degisti).")
 
 
 # --- CLI ---------------------------------------------------------------------

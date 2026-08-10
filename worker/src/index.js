@@ -34,6 +34,17 @@ export default {
           { headers: { "content-type": "application/json" } });
       return new Response("TK Fare-Watch bot up");
     }
+    // Python tarama scripti her SAGLIKLI taramadan sonra "son kontrol" damgasi atar
+    if (new URL(request.url).pathname === "/heartbeat") {
+      let body;
+      try { body = await request.json(); } catch { return new Response("bad", { status: 400 }); }
+      if (!env.WEBHOOK_SECRET || body.secret !== env.WEBHOOK_SECRET)
+        return new Response("forbidden", { status: 403 });
+      if (env.ACCESS)
+        await env.ACCESS.put("sys:lastscan",
+          JSON.stringify({ t: Date.now(), found: body.found ?? null }));
+      return new Response("ok");
+    }
     // Python tarama scripti bildirimleri buradan YETKILI HERKESE yollar
     if (new URL(request.url).pathname === "/broadcast") {
       let body;
@@ -317,7 +328,7 @@ async function handleQuery(env, chatId, text) {
   if (want === undefined)
     return send(env, chatId, "Anlamadım 🤔\n\n" + helpText(false), "HTML");
 
-  const data = await fetchData(env);
+  const [data, hb] = await Promise.all([fetchData(env), lastScanInfo(env)]);
   const dates = data.dates || {};
   let keys = Object.keys(dates).sort();
   if (want !== "all") keys = keys.filter((k) => monthOf(k) === want);
@@ -325,14 +336,14 @@ async function handleQuery(env, chatId, text) {
   if (keys.length === 0) {
     const label = want === "all" ? "seçilen aralık" : AY_ADI[want];
     return send(env, chatId,
-      `📭 <b>${label}</b> için şu an satışta bilet yok.\n(Ağustos başı ve 25 Ekim sonrası henüz kapalı.)`, "HTML");
+      `📭 <b>${label}</b> için şu an satışta bilet yok.\n` + freshnessLine(data, hb), "HTML");
   }
 
   const label = want === "all" ? "Tüm aylar" : AY_ADI[want];
   await send(env, chatId,
     `🎫 <b>${label} — ASB→İstanbul</b> · ${keys.length} tarihte bilet\n` +
     `E=Ekonomi · B=Business · P=Premium · Klt=son N koltuk · tek yön/USD\n` +
-    `<i>güncelleme: ${esc(data.updated || "")}</i>`, "HTML");
+    freshnessLine(data, hb), "HTML");
 
   const byMonth = {};
   for (const k of keys) (byMonth[monthOf(k)] ||= []).push(k);
@@ -381,11 +392,44 @@ function trNorm(s) {   // Turkce harfleri ASCII'ye (komut eslesmesi icin)
 }
 
 async function fetchData(env) {
+  // Her sorguda TAZE oku: 10 sn'lik cache-buster + CDN cache kapali.
+  // (raw.githubusercontent varsayilan olarak 5 dk cache'ler -> bayat tablo sebebiydi)
   const base = env.DATA_URL || DEFAULT_DATA_URL;
-  const url = base + (base.includes("?") ? "&" : "?") + "_=" + Math.floor(Date.now() / 60000);
-  const r = await fetch(url, { cf: { cacheTtl: 30 } });
+  const url = base + (base.includes("?") ? "&" : "?") + "_=" + Math.floor(Date.now() / 10000);
+  const r = await fetch(url, { cf: { cacheTtl: 0, cacheEverything: false } });
   if (!r.ok) throw new Error("veri alınamadı (" + r.status + ")");
   return await r.json();
+}
+
+async function lastScanInfo(env) {
+  if (!env.ACCESS) return null;
+  try { return JSON.parse((await env.ACCESS.get("sys:lastscan")) || "null"); }
+  catch { return null; }
+}
+
+function agoText(ms) {
+  const m = Math.max(0, Math.round(ms / 60000));
+  if (m < 1) return "az önce";
+  if (m < 60) return m + " dk önce";
+  const h = Math.floor(m / 60);
+  return h + " sa " + (m % 60) + " dk önce";
+}
+
+/** Tablonun ne kadar taze oldugunu tek satirda anlatir (+ gerekirse uyarir). */
+function freshnessLine(data, hb) {
+  const parts = [];
+  if (data && data.updated) parts.push("veri: " + esc(data.updated) + " (değişim)");
+  let warn = "";
+  if (hb && hb.t) {
+    const age = Date.now() - hb.t;
+    parts.push("son kontrol: " + agoText(age));
+    if (age > 20 * 60 * 1000)
+      warn = "\n⚠️ <b>Sistem " + agoText(age).replace(" önce", "") +
+             "dır kontrol edemedi — liste güncel olmayabilir.</b>";
+  } else {
+    warn = "\n⚠️ <b>Son kontrol zamanı bilinmiyor — liste güncel olmayabilir.</b>";
+  }
+  return "<i>🕐 " + parts.join(" · ") + "</i>" + warn;
 }
 
 async function send(env, chatId, text, parseMode) {

@@ -42,9 +42,10 @@ jobs:
           git config user.name  "fare-watch-bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add state.json latest.json
-          # Sadece gercek veri (state.json) degistiyse commit'le; latest.json'daki
-          # zaman damgasi her calismada degisir, tek basina commit spam'i yapmasin.
-          if git diff --cached --quiet -- state.json; then
+          # state.json VEYA latest.json degistiyse yayinla. latest.json'in zaman damgasi
+          # artik sadece icerik degisince yenilenir (write_latest), bu yuzden commit spam'i olmaz;
+          # buna karsilik tukenen bilet / koltuk degisimi ANINDA yayinlanir.
+          if git diff --cached --quiet -- state.json latest.json; then
             echo "Veri degismedi, commit yok."
           else
             git commit -m "state update [skip ci]"
