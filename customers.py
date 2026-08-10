@@ -121,6 +121,13 @@ def load_customers(log=print):
             continue
         bas = _parse_date(col(row, "baslangictarihi", "baslangic", "ilktarih"))
         bit = _parse_date(col(row, "bitistarihi", "bitis", "sontarih"))
+        # Tek tarih yeterli: bos olan taraf makul varsayilana cekilir
+        #   sadece bitis  -> bugunden o tarihe kadar
+        #   sadece baslangic -> o tarihten izleme sonuna kadar
+        if bit and not bas:
+            bas = date.today()
+        elif bas and not bit:
+            bit = date(2100, 1, 1)
         if not (bas and bit):
             tarihsiz += 1
             if "ornek_tarih" not in LAST_DIAG:   # tani: ham deger (tarih PII degil)
