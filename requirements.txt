@@ -1,3 +1,4 @@
 curl_cffi>=0.7
 requests>=2.31
 beautifulsoup4>=4.12
+google-auth>=2.30

@@ -448,6 +448,69 @@ def _chunks(text, size):
     return parts
 
 
+def notify_customers(new_avail, st, dry=False):
+    """
+    Yeni biletleri Sheets'teki musteri kriterleriyle eslestirip SAHIBE bildirir.
+    * Yalnizca tg_send (sahip) kullanilir; broadcast DEGIL -> kisisel veri yayilmaz.
+    * Ayni (musteri, tarih, ucus, sinif) bir daha bildirilmez (state['notified']).
+    * Kart bilgisi ne okunur ne yazilir; odemeyi kullanici elle tamamlar.
+    """
+    try:
+        import customers as cust
+    except Exception:
+        return
+    people = cust.load_customers(log=log)
+    if not people:
+        return
+    hits = cust.match(people, new_avail)
+    if not hits:
+        return
+
+    seen = set(st.setdefault("notified", []))
+    sent = 0
+    for c, d, cab, info in hits:
+        fl = info.get("fl") or ""
+        key = f"{_norm_name(c)}|{d.isoformat()}|{fl}|{cab}|{info['price']:.0f}"
+        if key in seen:
+            continue
+        seen.add(key)
+        tg_send(_customer_message(c, d, cab, info), dry=dry, parse_mode="HTML")
+        sent += 1
+    st["notified"] = sorted(seen)[-800:]     # listeyi sinirla (eski kayitlar dusulur)
+    if sent:
+        log(f"{sent} musteri eslesmesi bildirildi ({len(people)} musteri tarandi).")
+
+
+def _norm_name(c):
+    return f"{c.get('ad','')}{c.get('soyad','')}".strip().lower()
+
+
+def _customer_message(c, d, cab, info):
+    """Dokun-kopyala formatinda musteri bildirimi (KART BILGISI YOK)."""
+    def row(label, val):
+        return f"{label} <code>{_esc(val)}</code>" if val else ""
+    seats = info.get("seats")
+    lines = [
+        f"🎯 <b>{_esc((c.get('ad','') + ' ' + c.get('soyad','')).strip())}</b> için uygun bilet!",
+        f"{_gun_baslik(d)} · {cab} · <b>{info['price']:.0f}$</b>"
+        + (f" · son {seats} koltuk" if seats else ""),
+        "",
+        "<b>Yolcu bilgileri</b> — değere dokun, kopyalanır:",
+    ]
+    for lbl, val in (("Ad", c.get("ad")), ("Soyad", c.get("soyad")),
+                     ("Cinsiyet", c.get("cinsiyet")), ("Doğum", c.get("dogum")),
+                     ("Pasaport", c.get("pasaport")),
+                     ("Pas. bitiş", c.get("pasaport_bitis")),
+                     ("Uyruk", c.get("uyruk")), ("Telefon", c.get("telefon")),
+                     ("E-posta", c.get("eposta"))):
+        r = row(lbl, val)
+        if r:
+            lines.append(r)
+    lines += ["", f'▶️ <a href="{search_url(d)}">Bileti aç</a> → Seç → Devam Et',
+              "💳 Kartı telefonun kendi otomatik doldurmasıyla gir; SATIN AL'a sen bas."]
+    return "\n".join(lines)
+
+
 def send_heartbeat(found, dry=False):
     """
     'Son kontrol' bilgisini Worker'a (KV) yaz. Boylece bot, veri degismemis olsa bile
@@ -653,6 +716,7 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
     # --- Bildirimler: yeni bilet + fiyat dususu -> YETKILI HERKESE (broadcast) ---
     if new_avail:
         broadcast(_new_avail_message(new_avail), parse_mode="HTML", dry=dry)
+        notify_customers(new_avail, st, dry=dry)   # kriterle eslesen musteriler (sadece sahibe)
     if price_drop:
         broadcast(_price_drop_message(price_drop), parse_mode="HTML", dry=dry)
     if not new_avail and not price_drop:
