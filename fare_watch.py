@@ -26,6 +26,7 @@ import sys
 import json
 import time
 import argparse
+import threading
 from datetime import date, datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -46,13 +47,14 @@ ORIGIN      = "ASB"                 # Asgabat
 DEST        = "IST"                 # Istanbul
 DATE_START  = date(2026, 8, 1)      # izleme penceresi baslangici (gecmis gunler atlanir)
 DATE_END    = date(2026, 10, 31)    # izleme penceresi sonu
-MAX_WORKERS = 6                     # es zamanli istek sayisi (paralel tarama)
+MAX_WORKERS = 3                     # es zamanli istek sayisi (site yuke duyarli: dusuk tut)
 COLLAPSE_MIN = 5                    # saglikli tarama esigi (baseline + tam-cokme algisi)
 DISAPPEAR_AFTER = 1                 # bos DOGRULANDIKTAN sonra kac tarama beklensin (EMPTY_VERIFY zaten 3 kez dogruluyor)
                                     # (site cirpinmasinda yanlis "yeni bilet" uyarisini onler)
 ZERO_WARN = 4                       # tarama kac ardisik kez TAM 0 bulursa (~20 dk) uyari at
-EMPTY_VERIFY = 3                    # ONCEDEN DOLU bir tarih icin "bos" sonucu kac kez dogrulansin
-                                    # (site veri-merkezi IP'lerine bazen bos sayfa servis ediyor)
+EMPTY_VERIFY = 2                    # 2. asamada bir 'bos' sonuc kac kez daha dogrulansin
+SUSPECT_RATIO = 0.25                # bilinen dolu tarihlerin bu oranindan fazlasi ayni anda bosaldiysa
+                                    # -> site throttle ediyor say, veriyi DONDUR (toplu yanlis silme olmaz)
 OUTAGE_RATIO = 0.5                  # tarama, bilinen dolu tarihlerin bu oraninin altina duserse
                                     # tarama GUVENILMEZ say -> veriyi dondur (yanlis bosalmayi onle)
 REQUEST_TIMEOUT = 20                # her istek zaman asimi (sn)
@@ -246,14 +248,34 @@ def parse_fares(html: str, query_date=None):
     return result
 
 
+_tls = threading.local()
+
+
+def _session():
+    """
+    Her is parcacigi icin, ANA SAYFA ziyaretiyle isitilmis bir oturum.
+    Gercek tarayici gibi davranir (ASP.NET_SessionId cerezi alir); soguk,
+    cerezsiz isteklere gore site cok daha kararli sonuc donduruyor.
+    """
+    s = getattr(_tls, "s", None)
+    if s is None:
+        s = httpx.Session(impersonate=_IMPERSONATE) if _IMPERSONATE else httpx.Session()
+        if not _IMPERSONATE:
+            s.headers.update({
+                "User-Agent": USER_AGENT,
+                "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            })
+        try:
+            s.get(BASE + "/tr-TR", timeout=REQUEST_TIMEOUT)   # oturum cerezini al
+        except Exception:
+            pass
+        _tls.s = s
+    return s
+
+
 def http_get(url):
-    if _IMPERSONATE:
-        return httpx.get(url, impersonate=_IMPERSONATE, timeout=REQUEST_TIMEOUT)
-    return httpx.get(url, timeout=REQUEST_TIMEOUT, headers={
-        "User-Agent": USER_AGENT,
-        "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    })
+    return _session().get(url, timeout=REQUEST_TIMEOUT)
 
 
 def http_post(url, data):
@@ -302,31 +324,54 @@ def _fetch_once(d: date):
 
 def fetch_date(d: date, verify_empty=False):
     """
-    Donus: ('ok', fares_dict) | ('empty', {}) | ('fail', None)
-    'fail' -> dogrulanamadi, state/gosterim DEGISTIRILMEZ.
-
-    ONEMLI: Site zaman zaman GECERLI ama BOS sonuc sayfasi servis ediyor
-    (ozellikle veri-merkezi IP'lerine; sessiz bot-engelleme). Tek bir bos yanit
-    "bilet tukendi" sanilirsa liste yanlis boşalir. Bu yuzden tarih ONCEDEN DOLU
-    biliniyorsa (verify_empty=True) bos yanit ANINDA kabul edilmez: ust uste
-    EMPTY_VERIFY kez bos gelmesi gerekir.
+    1. asama: nazik tek gecis. 'fail' (ag/HTTP) durumunda birkac kez dener;
+    'empty' sonucu OLDUGU GIBI dondurur (dogrulama 2. asamada, sadece supheliler icin).
+    verify_empty parametresi geriye donuk uyumluluk icin durur.
     """
-    need_empty = EMPTY_VERIFY if verify_empty else 1
-    tries = FETCH_RETRIES + (need_empty - 1)
-    empty_hits = 0
-    for i in range(tries):
+    for _ in range(FETCH_RETRIES):
         s, f = _fetch_once(d)
-        if s == "ok":
-            return "ok", f
-        if s == "empty":
-            empty_hits += 1
-            if empty_hits >= need_empty:
-                return "empty", {}
+        if s in ("ok", "empty"):
+            return s, f
         time.sleep(1.2)
-    if empty_hits:
-        return "empty", {}
-    log(f"  [{d}] dogrulanamadi ({tries} deneme) - eski veri korunuyor")
+    log(f"  [{d}] dogrulanamadi - eski veri korunuyor")
     return "fail", None
+
+
+def verify_empties(results, st):
+    """
+    2. ASAMA — yanlis "tukendi" alarmini onler.
+    Onceden DOLU olup bu taramada BOS donen tarihler 'suphelidir': site yuk altinda
+    gecici olarak bos sayfa servis edebiliyor.
+      * Supheli sayisi cok ise (> SUSPECT_RATIO)  -> site throttle ediyor: hicbirine
+        dokunma, hepsini 'fail' yap (veri korunur, yanlis toplu silme olmaz).
+      * Supheli sayisi az ise -> her birini yavas yavas yeniden sor. Tekrar dolu
+        gelirse gercek veri geri alinir; israrla bos ise gercekten tukenmistir.
+    Donus: throttle suphesi var mi (bool)
+    """
+    suspects = [d for d, (s, _f) in results.items()
+                if s == "empty" and st["dates_has_any"].get(d.isoformat())]
+    if not suspects:
+        return False
+    prev_total = sum(1 for v in st["dates_has_any"].values() if v)
+    if prev_total >= COLLAPSE_MIN and len(suspects) > prev_total * SUSPECT_RATIO:
+        log(f"!! {len(suspects)}/{prev_total} tarih ayni anda bosaldi -> throttle suphesi, "
+            f"hicbiri silinmiyor (veri korunuyor).")
+        for d in suspects:
+            results[d] = ("fail", None)
+        return True
+
+    log(f"2. asama: {len(suspects)} supheli tarih yeniden dogrulaniyor...")
+    for d in suspects:
+        for _ in range(EMPTY_VERIFY):
+            time.sleep(1.0)
+            s, f = _fetch_once(d)
+            if s == "ok" and f:
+                results[d] = ("ok", f)
+                log(f"  [{d}] aslinda DOLU (gecici bos yanit) - duzeltildi")
+                break
+        else:
+            log(f"  [{d}] bos dogrulandi -> gercekten tukendi")
+    return False
 
 
 def _strip_tr(s: str) -> str:
@@ -492,6 +537,10 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
             except Exception as e:
                 results[dd] = ("fail", None)
                 log(f"[{dd}] thread hata: {e}")
+
+    # 2. asama: "tukendi" sanilan tarihleri dogrula (gecici bos yanitlari duzeltir)
+    if not baseline:
+        verify_empties(results, st)
 
     scanned_ok = sum(1 for (s, _) in results.values() if s != "fail")
     scan_found = sum(1 for (s, f) in results.values() if s == "ok" and f)
