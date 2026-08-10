@@ -24,6 +24,13 @@ const AY_NO = {
   ekim: 10, kasim: 11, "kasım": 11, aralik: 12, "aralık": 12,
 };
 const ALL_WORDS = ["tümü", "tumu", "tüm", "tum", "hepsi", "all", "hep"];
+// Sinif sozcukleri (trNorm'dan gecmis, ASCII halleriyle eslesir)
+const CABIN_WORDS = {
+  ekonomi: "E", economy: "E", eko: "E", eco: "E",
+  business: "B", biznes: "B", biz: "B", bussiness: "B",
+  premium: "P", prm: "P",
+};
+const CABIN_ADI = { E: "Ekonomi", B: "Business", P: "Premium" };
 
 export default {
   async fetch(request, env) {
@@ -321,25 +328,40 @@ async function cmdBildirim(env, chatId, args) {
 // ---------- Ay sorgusu ----------
 
 async function handleQuery(env, chatId, text) {
-  let want;
-  const tok = text.split(/\s+/)[0];
-  if (ALL_WORDS.includes(text) || ALL_WORDS.includes(tok)) want = "all";
-  else if (tok in AY_NO) want = AY_NO[tok];
+  // "eylül" · "tümü" · "ekonomi" · "eylül ekonomi" — sozcukler her sirada olabilir
+  let want, cabin;
+  for (const raw of text.split(/\s+/).filter(Boolean)) {
+    const n = trNorm(raw);
+    if (ALL_WORDS.includes(raw) || ALL_WORDS.includes(n)) want = "all";
+    else if (raw in AY_NO) want = AY_NO[raw];
+    else if (n in AY_NO) want = AY_NO[n];
+    else if (CABIN_WORDS[n]) cabin = CABIN_WORDS[n];
+  }
+  if (want === undefined && cabin) want = "all";   // sadece sinif yazildiysa: tum aylar
   if (want === undefined)
     return send(env, chatId, "Anlamadım 🤔\n\n" + helpText(false), "HTML");
 
   const [data, hb] = await Promise.all([fetchData(env), lastScanInfo(env)]);
-  const dates = data.dates || {};
+  let dates = data.dates || {};
+  if (cabin) {   // sinif filtresi: sadece o sinifin tarifeleri kalsin
+    const only = {};
+    for (const k of Object.keys(dates)) {
+      const keep = (dates[k] || []).filter((f) => f.c === cabin);
+      if (keep.length) only[k] = keep;
+    }
+    dates = only;
+  }
   let keys = Object.keys(dates).sort();
   if (want !== "all") keys = keys.filter((k) => monthOf(k) === want);
 
+  const scope = (want === "all" ? "Tüm aylar" : AY_ADI[want]) +
+                (cabin ? " · " + CABIN_ADI[cabin] : "");
   if (keys.length === 0) {
-    const label = want === "all" ? "seçilen aralık" : AY_ADI[want];
     return send(env, chatId,
-      `📭 <b>${label}</b> için şu an satışta bilet yok.\n` + freshnessLine(data, hb), "HTML");
+      `📭 <b>${scope}</b> için şu an satışta bilet yok.\n` + freshnessLine(data, hb), "HTML");
   }
 
-  const label = want === "all" ? "Tüm aylar" : AY_ADI[want];
+  const label = scope;
   await send(env, chatId,
     `🎫 <b>${label} — ASB→İstanbul</b> · ${keys.length} tarihte bilet\n` +
     `E=Ekonomi · B=Business · P=Premium · Klt=son N koltuk · tek yön/USD\n` +
@@ -387,7 +409,10 @@ function esc(s) {
 }
 
 function trNorm(s) {   // Turkce harfleri ASCII'ye (komut eslesmesi icin)
-  return String(s).replace(/ı/g, "i").replace(/İ/g, "i").replace(/ş/g, "s")
+  return String(s)
+    // "İ".toLowerCase() -> "i" + birlesik nokta (U+0307) birakir; once onu temizle
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/ı/g, "i").replace(/İ/g, "i").replace(/ş/g, "s")
     .replace(/ç/g, "c").replace(/ğ/g, "g").replace(/ö/g, "o").replace(/ü/g, "u");
 }
 
@@ -449,6 +474,9 @@ function helpText(isOwner) {
     "Bir <b>ay adı</b> yaz, o ayın biletlerini göndereyim:\n" +
     "<code>ağustos</code> · <code>eylül</code> · <code>ekim</code> …\n\n" +
     "Hepsi için: <b>tümü</b>\n\n" +
+    "<b>Sınıfa göre</b> (tüm aylar):\n" +
+    "<code>ekonomi</code> · <code>business</code> · <code>premium</code>\n" +
+    "İkisini birleştirebilirsin: <code>eylül ekonomi</code>\n\n" +
     "🟢 yeni bilet / 🔻 fiyat düşüşü olunca ayrıca otomatik haber gelir.";
   if (isOwner)
     t += "\n\n<b>Yönetici komutları</b>\n" +
