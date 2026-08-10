@@ -476,6 +476,7 @@ def check_customers(dry=False):
         tg_send("\n".join(msg), dry=dry, parse_mode="HTML")
         return
     log(f"SONUC: {len(people)} musteri okundu, kriterler gecerli. (detay Telegram'a gonderildi)")
+    board = current_board()      # su an satista olanlar (latest.json)
     lines = [f"✅ <b>Müşteri tablosu okundu</b> — {len(people)} kayıt\n"]
     for c in people:
         ad = f"{c.get('ad','')} {c.get('soyad','')}".strip()
@@ -486,8 +487,42 @@ def check_customers(dry=False):
         lines.append(f"• <b>{_esc(ad)}</b> — {c['bas'].strftime('%d.%m.%Y')}–"
                      f"{c['bit'].strftime('%d.%m.%Y')} · {cab}"
                      + (f"\n   ⚠️ eksik: {', '.join(eksik)}" if eksik else ""))
-    lines.append("\nEşleşen bilet çıktığında bildirim gelecek.")
+        # Su an kriterine UYAN biletler
+        hits = [(d, cb, inf) for d, cb, inf in board
+                if c["bas"] <= d <= c["bit"] and (not c["cabin"] or c["cabin"] == cb)]
+        if not hits:
+            lines.append("   şu an uyan bilet yok")
+            continue
+        ucuz = min(h[2]["price"] for h in hits)
+        lines.append(f"   🎫 şu an <b>{len(hits)}</b> uygun bilet · en ucuz <b>{ucuz:.0f}$</b>")
+        for d, cb, inf in sorted(hits, key=lambda h: (h[2]["price"], h[0]))[:5]:
+            seat = f" · son {inf['seats']} koltuk" if inf.get("seats") else ""
+            lines.append(f"   · {_gun_baslik(d)} — {cb} {inf['price']:.0f}${seat}")
+        if len(hits) > 5:
+            lines.append(f"   · … +{len(hits)-5} tane daha")
+    lines.append("\n<i>Bundan sonra sadece YENİ çıkan biletlerde bildirim gelir.</i>")
     tg_send("\n".join(lines), dry=dry, parse_mode="HTML")
+
+
+def current_board():
+    """latest.json -> [(date, 'Ekonomi'|'Business'|'Premium', info), ...] (su anki arz)."""
+    try:
+        with open(LATEST_FILE, encoding="utf-8") as fp:
+            data = json.load(fp) or {}
+    except Exception:
+        return []
+    ad = {"E": "Ekonomi", "B": "Business", "P": "Premium"}
+    out = []
+    for diso, arr in (data.get("dates") or {}).items():
+        try:
+            d = datetime.strptime(diso, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        for e in arr or []:
+            out.append((d, ad.get(e.get("c"), e.get("c")),
+                        {"price": e.get("p", 0), "seats": e.get("s"),
+                         "dep": e.get("t"), "fl": e.get("fl")}))
+    return out
 
 
 def notify_customers(new_avail, st, dry=False):
