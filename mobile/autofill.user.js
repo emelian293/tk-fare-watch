@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TK Fare-Watch — Yolcu Bilgisi Otomatik Doldur
 // @namespace    tk-fare-watch
-// @version      1.2
+// @version      1.3
 // @description  Telegram'daki bilet linkindeki yolcu bilgilerini ödeme formuna doldurur. KART bilgilerine DOKUNMAZ.
 // @match        https://turkmenistanairlinestr.com/*
 // @run-at       document-idle
@@ -49,7 +49,8 @@
   let tries = 0;
   const timer = setInterval(() => {
     const yolcuVar = document.querySelector('[name="Name[0]"]');
-    const telVar = document.querySelector('[name="GsmNumber"]');
+    const telVar = document.querySelector('[name="TravellerGms"]') ||
+                   document.querySelector('[name="GsmNumber"]');
     if (yolcuVar && (telVar || tries > 12)) {        // telefon 6 sn'de gelmezse yine de doldur
       clearInterval(timer);
       fill(pax);
@@ -73,8 +74,13 @@
     const telSonuc = fillPhone(p.telefon);
     n += telSonuc;
     if (p.telefon && !telSonuc) eksik.push("telefon");
-    // NOT: Bu formda "pasaport bitis tarihi" alani YOKTUR.
-    //      ExpiredMonth/ExpiredYear KARTIN son kullanma tarihidir -> ASLA doldurulmaz.
+    // Pasaport bitis tarihi — sitede adi 'PassortEndDate' (yazim hatasi onlarda);
+    // duzeltirlerse diye dogru yazimi da deniyoruz.
+    const pbSonuc = setText('[name="PassortEndDate[0]"]', p.pasaport_bitis) ||
+                    setText('[name="PassportEndDate[0]"]', p.pasaport_bitis);
+    n += pbSonuc;
+    if (p.pasaport_bitis && !pbSonuc) eksik.push("pasaport bitiş");
+    // NOT: ExpiredMonth/ExpiredYear KARTIN son kullanma tarihidir -> ASLA doldurulmaz.
     if (!sessiz || n)
       toast(n ? `✅ ${n} alan dolduruldu${eksik.length ? " · eksik: " + eksik.join(", ") : ""}`
               : "⚠️ Alan bulunamadı — 👤 Tekrar doldur'a bas");
@@ -96,13 +102,20 @@
           if (opt) {
             sel.value = opt.value;
             sel.dispatchEvent(new Event("change", { bubbles: true }));
-            return 1 + setText('[name="GsmNumber"]', bare.slice(len));
+            return 1 + telYaz(bare.slice(len));
           }
         }
       }
-      return setText('[name="GsmNumber"]', bare);
+      return telYaz(bare);
     }
-    return setText('[name="GsmNumber"]', raw.replace(/^0+/, ""));   // bastaki 0'i at
+    return telYaz(raw.replace(/^0+/, ""));   // bastaki 0'i at
+  }
+
+  /* Numarayi dogru alana yaz: mobil/masaustu duzende adi degisebiliyor. */
+  function telYaz(no) {
+    return setText('[name="TravellerGms"]', no) ||
+           setText('[name="GsmNumber"]', no) ||
+           setText('[name="TravellerGsm"]', no);
   }
 
   /* Yaygin ulke adlari -> ISO kodu (secici deger olarak kodu kullaniyor) */
