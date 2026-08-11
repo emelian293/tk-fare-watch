@@ -191,18 +191,19 @@ async function onCallback(env, cq) {
   const kim = (cq.from && (cq.from.first_name || cq.from.username)) || "";
   const damga = new Date().toLocaleString("tr-TR", { timeZone: "Europe/Istanbul" });
 
-  // Mesajin altina sonucu yaz, butonlari kaldir (tekrar basilmasin)
+  // Butonlari kaldir (tekrar basilmasin). Mesaj METNINE dokunmuyoruz:
+  // yoksa <code> bloklari duz metne doner ve dokun-kopyala ozelligi kaybolur.
   if (cq.message) {
-    await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/editMessageText`, {
+    await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/editMessageReplyMarkup`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId, message_id: cq.message.message_id,
-        text: (cq.message.text || "") +
-              `\n\n${ok === "1" ? "✅ ALINDI" : "❌ Olmadı"} — ${esc(kim)} · ${esc(damga)}`,
-        disable_web_page_preview: true,
-      }),
+      body: JSON.stringify({ chat_id: chatId, message_id: cq.message.message_id,
+                             reply_markup: { inline_keyboard: [] } }),
     });
   }
+  // Kisa teyit (yetkili herkes gorsun: ayni bilet icin iki kisi ugrasmasin)
+  await broadcastToAll(env,
+    `${ok === "1" ? "✅ <b>ALINDI</b>" : "❌ <b>Olmadı</b>"} — ${esc(kim)} · ${esc(damga)}`,
+    "HTML");
   // Tabloya yaz (GitHub tarafinda; ~1 dk)
   await dispatchWorkflow(env, { mark: `${satir}|${ymd}|${ok}`, report: "false" });
 }
