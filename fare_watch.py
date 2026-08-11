@@ -481,8 +481,8 @@ def check_customers(dry=False):
     for c in people:
         hits = [(d, cb, inf) for d, cb, inf in board
                 if c["bas"] <= d <= c["bit"] and (not c["cabin"] or c["cabin"] == cb)]
-        tg_send(_customer_report_message(c, hits), dry=dry, parse_mode="HTML")
-    tg_send(f"✅ {len(people)} müşteri kontrol edildi.\n"
+        broadcast(_customer_report_message(c, hits), parse_mode="HTML", dry=dry)
+    broadcast(f"✅ {len(people)} müşteri kontrol edildi.\n"
             "<i>Bundan sonra sadece YENİ çıkan biletlerde otomatik bildirim gelir.</i>",
             dry=dry, parse_mode="HTML")
 
@@ -534,7 +534,9 @@ def notify_customers(new_avail, st, dry=False):
         if key in seen:
             continue
         seen.add(key)
-        tg_send(_customer_message(c, d, cab, info), dry=dry, parse_mode="HTML")
+        # Sahibin tercihi: musteri bildirimi YETKILI HERKESE gitsin (ekip birlikte alsin).
+        # Not: mesaj pasaport/dogum/telefon icerir -> yalnizca /izinver ile eklenenler gorur.
+        broadcast(_customer_message(c, d, cab, info), parse_mode="HTML", dry=dry)
         sent += 1
     st["notified"] = sorted(seen)[-800:]     # listeyi sinirla (eski kayitlar dusulur)
     if sent:
@@ -568,6 +570,22 @@ def _pax_block(c):
 _KART_NOTU = "💳 Kartı telefonun kendi otomatik doldurmasıyla gir; SATIN AL'a sen bas."
 
 
+def pax_link(c, d):
+    """
+    Bilet linki + yolcu verisi URL 'fragment'inda (#p=...).
+    Fragment SUNUCUYA GONDERILMEZ; sadece tarayicida kalir. Telefondaki kullanici
+    betigi (mobile/autofill.user.js) bunu okuyup yolcu alanlarini doldurur.
+    KART bilgisi BURADA YOKTUR.
+    """
+    import base64
+    pax = {k: (c.get(k) or "") for k in
+           ("ad", "soyad", "cinsiyet", "dogum", "pasaport", "pasaport_bitis",
+            "uyruk", "telefon", "eposta")}
+    blob = base64.urlsafe_b64encode(
+        json.dumps(pax, ensure_ascii=False).encode("utf-8")).decode().rstrip("=")
+    return f"{search_url(d)}#p={blob}"
+
+
 def _customer_message(c, d, cab, info):
     """Yeni bilet -> tek bilet icin tam aksiyon mesaji."""
     seats = info.get("seats")
@@ -577,7 +595,7 @@ def _customer_message(c, d, cab, info):
         + (f" · son {seats} koltuk" if seats else ""),
         "",
     ] + _pax_block(c) + [
-        "", f'▶️ <a href="{search_url(d)}">Bileti aç</a> → Seç → Devam Et', _KART_NOTU]
+        "", f'▶️ <a href="{pax_link(c, d)}">Bileti aç</a> → Seç → Devam Et', _KART_NOTU]
     return "\n".join(lines)
 
 
@@ -603,7 +621,7 @@ def _customer_report_message(c, hits, limit=8):
         seat = f" · son {info['seats']} koltuk" if info.get("seats") else ""
         saat = f" {info['dep']}" if info.get("dep") else ""
         lines.append(f'· {_gun_baslik(d)}{saat} — {cb} <b>{info["price"]:.0f}$</b>{seat}\n'
-                     f'  <a href="{search_url(d)}">Bileti aç</a>')
+                     f'  <a href="{pax_link(c, d)}">Bileti aç</a>')
     if len(hits) > limit:
         lines.append(f"<i>… +{len(hits)-limit} bilet daha (tümü için: ekonomi / business)</i>")
     lines += ["", _KART_NOTU]
