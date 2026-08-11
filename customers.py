@@ -81,7 +81,7 @@ def load_customers(log=print):
     try:
         creds = service_account.Credentials.from_service_account_info(
             json.loads(SA_JSON),
-            scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+            scopes=["https://www.googleapis.com/auth/spreadsheets"])
         sess = AuthorizedSession(creds)
         url = (f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}"
                f"/values/{SHEET_RANGE}")
@@ -110,14 +110,18 @@ def load_customers(log=print):
         return ""
 
     out = []
-    bos_satir = pasif = tarihsiz = 0
-    for row in rows[1:]:
+    bos_satir = pasif = tarihsiz = alindi = 0
+    for satir_no, row in enumerate(rows[1:], start=2):   # Sheets satir no (1=baslik)
         if not any(str(c).strip() for c in row):
             bos_satir += 1
             continue
-        aktif = _norm(col(row, "aktif", "durum"))
+        aktif = _norm(col(row, "aktif"))
         if aktif in ("hayir", "pasif", "kapali", "no", "0", "false"):
             pasif += 1
+            continue
+        # Bileti alinmis musteri icin artik bildirim gonderme (hucreyi silince yeniden baslar)
+        if "alindi" in _norm(col(row, "durum", "sonuc")):
+            alindi += 1
             continue
         bas = _parse_date(col(row, "baslangictarihi", "baslangic", "ilktarih"))
         bit = _parse_date(col(row, "bitistarihi", "bitis", "sontarih"))
@@ -146,16 +150,73 @@ def load_customers(log=print):
             "dogum":    col(row, "dogumtarihi", "dogum"),
             "uyruk":    col(row, "uyruk", "ulke", "ulkesi", "nationality",
                              "pasaportulkesi", "pasaportulke", "country"),
+            "satir": satir_no,
             "bas": bas, "bit": bit,
             "cabin": _cabin_of(col(row, "biletturu", "bilettipi", "sinif")),
         })
     LAST_DIAG.update({"gecerli": len(out), "bos_satir": bos_satir,
-                      "pasif": pasif, "tarihsiz": tarihsiz})
+                      "pasif": pasif, "tarihsiz": tarihsiz, "alindi": alindi})
     if not out:
         LAST_DIAG["neden"] = (
             f"{tarihsiz} satirda Baslangic/Bitis Tarihi okunamadi"
             if tarihsiz else (f"{pasif} satir 'Aktif' degil" if pasif else "veri satiri yok"))
     return out
+
+
+def _col_harf(i):
+    """0 -> A, 25 -> Z, 26 -> AA"""
+    s = ""
+    i += 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def mark_purchase(satir_no, alindi, bilet_notu="", log=print):
+    """
+    Satin alma sonucunu tabloya yazar: Durum + Islem Tarihi + Not.
+    Sutunlar tabloda yoksa sessizce atlanir (kullanici eklemeden calismaz).
+    KART bilgisi ne okunur ne yazilir.
+    """
+    if not (SHEET_ID and SA_JSON):
+        return False, "Sheets kurulumu yok"
+    try:
+        from google.oauth2 import service_account
+        from google.auth.transport.requests import AuthorizedSession
+        creds = service_account.Credentials.from_service_account_info(
+            json.loads(SA_JSON),
+            scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        sess = AuthorizedSession(creds)
+        base = f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}"
+        r = sess.get(f"{base}/values/1:1", timeout=25)          # baslik satiri
+        if r.status_code != 200:
+            return False, f"baslik okunamadi (HTTP {r.status_code})"
+        head = [_norm(h) for h in ((r.json() or {}).get("values") or [[]])[0]]
+
+        hedef = {"durum": "Alındı" if alindi else "Olmadı",
+                 "islemtarihi": datetime.now().strftime("%d.%m.%Y %H:%M"),
+                 "not": bilet_notu}
+        data = []
+        for ad, deger in hedef.items():
+            adaylar = {"durum": ["durum", "sonuc"],
+                       "islemtarihi": ["islemtarihi", "islemzamani", "tarihsaat"],
+                       "not": ["not", "aciklama", "bilet"]}[ad]
+            for a in adaylar:
+                if a in head:
+                    h = _col_harf(head.index(a))
+                    data.append({"range": f"{h}{satir_no}", "values": [[deger]]})
+                    break
+        if not data:
+            return False, "Durum/İşlem Tarihi/Not sütunları tabloda yok"
+        w = sess.post(f"{base}/values:batchUpdate", timeout=25,
+                      json={"valueInputOption": "USER_ENTERED", "data": data})
+        if w.status_code != 200:
+            return False, f"yazilamadi (HTTP {w.status_code})"
+        return True, f"{len(data)} hücre güncellendi"
+    except Exception as e:
+        log(f"mark_purchase hata: {type(e).__name__}")
+        return False, type(e).__name__
 
 
 def match(customers, new_avail):

@@ -536,7 +536,8 @@ def notify_customers(new_avail, st, dry=False):
         seen.add(key)
         # Sahibin tercihi: musteri bildirimi YETKILI HERKESE gitsin (ekip birlikte alsin).
         # Not: mesaj pasaport/dogum/telefon icerir -> yalnizca /izinver ile eklenenler gorur.
-        broadcast(_customer_message(c, d, cab, info), parse_mode="HTML", dry=dry)
+        broadcast(_customer_message(c, d, cab, info), parse_mode="HTML", dry=dry,
+                  reply_markup=_satinal_butonlari(c, d))
         sent += 1
     st["notified"] = sorted(seen)[-800:]     # listeyi sinirla (eski kayitlar dusulur)
     if sent:
@@ -568,6 +569,14 @@ def _pax_block(c):
 
 
 _KART_NOTU = "💳 Kartı telefonun kendi otomatik doldurmasıyla gir; SATIN AL'a sen bas."
+
+
+def _satinal_butonlari(c, d):
+    """Bildirim altina 'Aldim / Olmadi' butonlari. callback_data 64 bayti asmamali."""
+    ymd = d.strftime("%Y%m%d")
+    return {"inline_keyboard": [[
+        {"text": "✅ Aldım",  "callback_data": f"m|{c.get('satir', 0)}|{ymd}|1"},
+        {"text": "❌ Olmadı", "callback_data": f"m|{c.get('satir', 0)}|{ymd}|0"}]]}
 
 
 def pax_link(c, d):
@@ -644,7 +653,7 @@ def send_heartbeat(found, dry=False):
         log(f"heartbeat gonderilemedi: {e}")
 
 
-def broadcast(text, parse_mode=None, dry=False):
+def broadcast(text, parse_mode=None, dry=False, reply_markup=None):
     """Yeni bilet / fiyat dususu -> yetkili TUM kullanicilara (owner + KV izinliler).
     Worker'in /broadcast ucuna gonderir; basarisizsa sadece owner'a duser."""
     if dry:
@@ -655,6 +664,8 @@ def broadcast(text, parse_mode=None, dry=False):
             payload = {"secret": BROADCAST_SECRET, "text": text}
             if parse_mode:
                 payload["parse_mode"] = parse_mode
+            if reply_markup:
+                payload["reply_markup"] = reply_markup
             url = WORKER_BASE.rstrip("/") + "/broadcast"
             kw = {"impersonate": _IMPERSONATE} if _IMPERSONATE else {}
             r = httpx.post(url, json=payload, timeout=20, **kw)
@@ -1045,7 +1056,26 @@ def main():
                     help="Bu calismada mevcut tum biletlerin tam listesini gonder")
     ap.add_argument("--check-customers", action="store_true",
                     help="Musteri tablosu kurulumunu dogrula (detay Telegram'a)")
+    ap.add_argument("--mark", type=str, default=None,
+                    help="Satin alma sonucunu tabloya yaz: 'satir|YYYYAAGG|1' (1=alindi, 0=olmadi)")
     args = ap.parse_args()
+
+    if args.mark:
+        try:
+            satir, ymd, ok = args.mark.split("|")
+            import customers as cust
+            tarih = datetime.strptime(ymd, "%Y%m%d").date()
+            basarili, mesaj = cust.mark_purchase(
+                int(satir), ok == "1",
+                bilet_notu=f"{tarih.strftime('%d.%m.%Y')} ASB→IST", log=log)
+            log(f"mark sonucu: {basarili} - {mesaj}")
+            if not basarili:
+                tg_send(f"⚠️ Tabloya yazılamadı: {_esc(mesaj)}\n"
+                        "<i>Tabloda <b>Durum</b> ve <b>İşlem Tarihi</b> sütunları var mı? "
+                        "Servis hesabı <b>Düzenleyen</b> mi?</i>", parse_mode="HTML")
+        except Exception as e:
+            log(f"mark hatasi: {type(e).__name__}")
+        return
 
     if args.check_customers:
         log("Musteri tablosu kontrol ediliyor...")

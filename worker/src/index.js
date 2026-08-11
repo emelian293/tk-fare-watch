@@ -58,7 +58,7 @@ export default {
       try { body = await request.json(); } catch { return new Response("bad", { status: 400 }); }
       if (!env.WEBHOOK_SECRET || body.secret !== env.WEBHOOK_SECRET)
         return new Response("forbidden", { status: 403 });
-      await broadcastToAll(env, body.text, body.parse_mode);
+      await broadcastToAll(env, body.text, body.parse_mode, body.reply_markup);
       return new Response("ok");
     }
     if (env.WEBHOOK_SECRET &&
@@ -67,6 +67,10 @@ export default {
     }
     let update;
     try { update = await request.json(); } catch { return new Response("ok"); }
+    if (update.callback_query) {                       // "Aldım / Olmadı" butonlari
+      try { await onCallback(env, update.callback_query); } catch (_) {}
+      return new Response("ok");
+    }
     const msg = update.message || update.edited_message;
     if (msg && msg.text) {
       try { await route(env, msg); }
@@ -160,14 +164,65 @@ async function triggerScan(env) {
   }
 }
 
-async function broadcastToAll(env, text, parseMode) {
+async function broadcastToAll(env, text, parseMode, replyMarkup) {
   const ids = new Set();
   if (env.OWNER_CHAT_ID) ids.add(String(env.OWNER_CHAT_ID));
   if (env.ACCESS) {
     const list = await env.ACCESS.list({ prefix: "u:" });
     for (const k of list.keys) ids.add(k.name.slice(2));
   }
-  for (const id of ids) await send(env, id, text, parseMode);
+  for (const id of ids) await send(env, id, text, parseMode, replyMarkup);
+}
+
+/* "✅ Aldım / ❌ Olmadı" butonuna basilinca: mesaji guncelle + tabloya yazdir.
+   Tabloya yazma isini GitHub'a devrediyoruz (servis hesabi anahtari orada duruyor). */
+async function onCallback(env, cq) {
+  const data = String(cq.data || "");
+  const chatId = cq.message && cq.message.chat && cq.message.chat.id;
+  const m = data.match(/^m\|(\d+)\|(\d{8})\|([01])$/);
+  await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/answerCallbackQuery`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ callback_query_id: cq.id,
+                           text: m ? (m[3] === "1" ? "Kaydediliyor: Alındı" : "Kaydediliyor: Olmadı")
+                                   : "Anlaşılmadı" }),
+  });
+  if (!m) return;
+  const [, satir, ymd, ok] = m;
+  const kim = (cq.from && (cq.from.first_name || cq.from.username)) || "";
+  const damga = new Date().toLocaleString("tr-TR", { timeZone: "Europe/Istanbul" });
+
+  // Mesajin altina sonucu yaz, butonlari kaldir (tekrar basilmasin)
+  if (cq.message) {
+    await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/editMessageText`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId, message_id: cq.message.message_id,
+        text: (cq.message.text || "") +
+              `\n\n${ok === "1" ? "✅ ALINDI" : "❌ Olmadı"} — ${esc(kim)} · ${esc(damga)}`,
+        disable_web_page_preview: true,
+      }),
+    });
+  }
+  // Tabloya yaz (GitHub tarafinda; ~1 dk)
+  await dispatchWorkflow(env, { mark: `${satir}|${ymd}|${ok}`, report: "false" });
+}
+
+async function dispatchWorkflow(env, inputs) {
+  if (!env.GH_TOKEN) return false;
+  const owner = env.GH_OWNER || "emelian293";
+  const repo = env.GH_REPO || "tk-fare-watch";
+  const wf = env.GH_WORKFLOW || "watch.yml";
+  try {
+    const r = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${wf}/dispatches`,
+      { method: "POST",
+        headers: { "Authorization": `Bearer ${env.GH_TOKEN}`,
+                   "Accept": "application/vnd.github+json",
+                   "X-GitHub-Api-Version": "2022-11-28",
+                   "User-Agent": "tk-fare-bot" },
+        body: JSON.stringify({ ref: "main", inputs }) });
+    return r.ok;
+  } catch (_) { return false; }
 }
 
 async function route(env, msg) {
@@ -489,9 +544,10 @@ function freshnessLine(data, hb) {
   return "<i>🕐 " + parts.join(" · ") + "</i>" + warn;
 }
 
-async function send(env, chatId, text, parseMode) {
+async function send(env, chatId, text, parseMode, replyMarkup) {
   const body = { chat_id: chatId, text, disable_web_page_preview: true };
   if (parseMode) body.parse_mode = parseMode;
+  if (replyMarkup) body.reply_markup = replyMarkup;
   try {
     await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
       method: "POST",

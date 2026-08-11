@@ -13,6 +13,10 @@ on:
         description: "Sadece musteri tablosu kurulumunu dogrula (tarama yapma)"
         type: boolean
         default: false
+      mark:
+        description: "Satin alma sonucunu tabloya yaz: satir|YYYYAAGG|1"
+        type: string
+        default: ""
 
 permissions:
   contents: write             # state.json'u repoya geri commit'lemek icin
@@ -43,7 +47,9 @@ jobs:
           CUSTOMERS_SHEET_ID: ${{ secrets.CUSTOMERS_SHEET_ID }}
           GOOGLE_SA_JSON:     ${{ secrets.GOOGLE_SA_JSON }}
         run: |
-          if [ "${{ github.event.inputs.check }}" = "true" ]; then
+          if [ -n "${{ github.event.inputs.mark }}" ]; then
+            python fare_watch.py --mark "${{ github.event.inputs.mark }}"
+          elif [ "${{ github.event.inputs.check }}" = "true" ]; then
             python fare_watch.py --check-customers
           else
             python fare_watch.py ${{ github.event.inputs.report == 'true' && '--report' || '' }}
