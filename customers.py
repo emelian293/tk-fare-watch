@@ -12,7 +12,16 @@ GIZLILIK KURALLARI (bilerek boyle):
 
 Sheets sutunlari (1. satir baslik, sira onemsiz — baslik adiyla eslesir):
   Ad | Soyad | Cinsiyet | Telefon | E-posta | Pasaport No | Pasaport Bitis |
-  Dogum Tarihi | Uyruk | Baslangic Tarihi | Bitis Tarihi | Bilet Turu | Aktif
+  Dogum Tarihi | Ulke | Baslangic Tarihi | Bitis Tarihi | Bilet Turu |
+  Durum | Islem Tarihi | Not
+
+DURUM sutunu is akisini yonetir:
+  bos / "Bekliyor"  -> musteri izlenir, bildirim gelir
+  "Alindi"          -> is bitti; bildirim de gelmez, 'musteri' raporunda da cikmaz
+                       (Telegram'daki '✅ Aldim' butonu buraya yazar; hucreyi
+                        temizlersen musteri yeniden izlenmeye baslar)
+  "Olmadi"          -> izlenmeye devam eder
+('Aktif' sutunu artik gerekmez; varsa 'Hayir' yine de devre disi birakir.)
 """
 
 import os
@@ -31,9 +40,19 @@ BLOCKED = ("kart", "card", "cvv", "cvc", "sonkullanma", "sonkullanim", "expiry",
 LAST_DIAG = {}
 
 
+# Turkce harfler once ASCII karsiligina cevrilmeli. Aksi halde noktasiz 'ı'
+# ASCII'ye cevrilirken TAMAMEN DUSER: "Alındı" -> "alnd", "Başlangıç" -> "baslangc"
+# gibi bozulur ve sutun/deger eslesmesi sessizce basarisiz olur.
+_TR_MAP = str.maketrans({
+    "ı": "i", "İ": "i", "ş": "s", "Ş": "s", "ç": "c", "Ç": "c",
+    "ğ": "g", "Ğ": "g", "ö": "o", "Ö": "o", "ü": "u", "Ü": "u",
+})
+
+
 def _norm(s):
-    """Baslik/deger normalize: kucuk harf, TR karakterler sade, bosluksuz."""
-    s = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode()
+    """Baslik/deger normalize: kucuk harf, TR karakterler ASCII, bosluksuz."""
+    s = str(s or "").translate(_TR_MAP)
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
     return s.lower().replace(" ", "").replace("-", "").replace("_", "").strip()
 
 
