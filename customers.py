@@ -144,7 +144,8 @@ def load_customers(log=print):
             "pasaport": col(row, "pasaportno", "pasaport"),
             "pasaport_bitis": col(row, "pasaportbitistarihi", "pasaportbitis"),
             "dogum":    col(row, "dogumtarihi", "dogum"),
-            "uyruk":    col(row, "uyruk", "nationality", "pasaportulkesi"),
+            "uyruk":    col(row, "uyruk", "ulke", "ulkesi", "nationality",
+                             "pasaportulkesi", "pasaportulke", "country"),
             "bas": bas, "bit": bit,
             "cabin": _cabin_of(col(row, "biletturu", "bilettipi", "sinif")),
         })

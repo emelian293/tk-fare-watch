@@ -55,22 +55,59 @@
     n += setText('[name="PassportNo[0]"]', p.pasaport);
     n += setText('[name="BirthDate[0]"]', p.dogum);
     n += setText('[name="TravellerEmail"]', p.eposta) || setText('[name="Email"]', p.eposta);
-    n += setText('[name="GsmNumber"]', onlyDigits(p.telefon));
     n += setSelect('[name="Gender[0]"]', genderWords(p.cinsiyet));
-    n += setSelect('[name="PassportCountry[0]"]', [p.uyruk]);
-    // Pasaport bitis tarihi alani varsa (site surumune gore adi degisebilir)
-    for (const sel of ['[name="PassportExpireDate[0]"]', '[name="PassportValidity[0]"]',
-                       '[name="PassportExpiry[0]"]'])
-      if (document.querySelector(sel)) { n += setText(sel, p.pasaport_bitis); break; }
-
+    // Ulke: secenek degeri ISO kodu (TM=Türkmenistan) — hem ada hem koda bak
+    n += setSelect('[name="PassportCountry[0]"]', [p.uyruk, ulkeKodu(p.uyruk)]);
+    n += fillPhone(p.telefon);
+    // NOT: Bu formda "pasaport bitis tarihi" alani YOKTUR.
+    //      ExpiredMonth/ExpiredYear KARTIN son kullanma tarihidir -> ASLA doldurulmaz.
     toast(n ? `✅ ${n} alan dolduruldu — kartı sen gir, SATIN AL'a sen bas`
             : "⚠️ Alanlar bulunamadı (site değişmiş olabilir)");
     addButton(p);   // gerekirse tekrar doldur
   }
 
+  /* Telefon: site ulke kodunu AYRI bir secicide tutuyor (993 = TM - 993),
+     numara alani ise kodsuz bekliyor ("555 123 45 66"). Ona gore bol. */
+  function fillPhone(tel) {
+    const raw = String(tel || "").replace(/[^\d+]/g, "");
+    if (!raw) return 0;
+    if (raw.startsWith("+")) {
+      const bare = raw.slice(1);
+      const sel = document.querySelector('[name="TravellerGsmCountry"]');
+      if (sel) {
+        for (let len = 4; len >= 1; len--) {           // en uzun eslesen ulke kodu
+          const cc = bare.slice(0, len);
+          const opt = Array.from(sel.options).find(o => o.value === cc);
+          if (opt) {
+            sel.value = opt.value;
+            sel.dispatchEvent(new Event("change", { bubbles: true }));
+            return 1 + setText('[name="GsmNumber"]', bare.slice(len));
+          }
+        }
+      }
+      return setText('[name="GsmNumber"]', bare);
+    }
+    return setText('[name="GsmNumber"]', raw.replace(/^0+/, ""));   // bastaki 0'i at
+  }
+
+  /* Yaygin ulke adlari -> ISO kodu (secici deger olarak kodu kullaniyor) */
+  function ulkeKodu(u) {
+    const n = String(u || "").toLocaleLowerCase("tr");
+    if (/türkmen|turkmen/.test(n)) return "TM";
+    if (/türkiye|turkiye|turkey/.test(n)) return "TR";
+    if (/özbek|ozbek|uzbek/.test(n)) return "UZ";
+    if (/rus|russia/.test(n)) return "RU";
+    if (/azerb/.test(n)) return "AZ";
+    return null;
+  }
+
+  // KART alanlari: hicbir kosulda doldurulmaz (CardNumber, Cvc, ExpiredMonth/Year, CardOwner)
+  const KART = /card|cvc|cvv|expired/i;
+  const kartMi = el => KART.test((el && (el.name || el.id)) || "");
+
   function setText(sel, val) {
     const el = document.querySelector(sel);
-    if (!el || !val) return 0;
+    if (!el || !val || kartMi(el)) return 0;
     const proto = el instanceof HTMLTextAreaElement
       ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     // React/jQuery bagli alanlar icin dogal deger atamasi + olaylar
@@ -83,7 +120,7 @@
 
   function setSelect(sel, wanted) {
     const el = document.querySelector(sel);
-    if (!el || !wanted || !wanted.length) return 0;
+    if (!el || !wanted || !wanted.length || kartMi(el)) return 0;
     const norm = s => String(s || "").toLocaleLowerCase("tr")
       .replace(/[̀-ͯ]/g, "")
       .replace(/ı/g, "i").replace(/ş/g, "s").replace(/ç/g, "c")
@@ -106,8 +143,6 @@
     if (/^(k|kadın|kadin|bayan|female|f)$/.test(n)) return ["kadin", "kadın", "female", "bayan", "f", "2"];
     return [g];
   }
-
-  const onlyDigits = s => String(s || "").replace(/[^\d+]/g, "");
 
   function readPax() {
     try { return JSON.parse(sessionStorage.getItem(KEY) || "null"); }
