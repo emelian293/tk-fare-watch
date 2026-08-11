@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TK Fare-Watch — Yolcu Bilgisi Otomatik Doldur
 // @namespace    tk-fare-watch
-// @version      1.1
+// @version      1.2
 // @description  Telegram'daki bilet linkindeki yolcu bilgilerini ödeme formuna doldurur. KART bilgilerine DOKUNMAZ.
 // @match        https://turkmenistanairlinestr.com/*
 // @run-at       document-idle
@@ -43,15 +43,25 @@
   if (!pax) return;
   if (!/\/Flight\/Payment\//i.test(location.pathname)) return;
 
+  /* Alanlar ayni anda gelmiyor: yolcu bolumu once, iletisim (telefon) bolumu
+     daha gec render olabiliyor. Ikisini de bekle; yine de gec gelene karsi
+     birkac kez daha dene. */
   let tries = 0;
   const timer = setInterval(() => {
-    if (document.querySelector('[name="Name[0]"]')) { clearInterval(timer); fill(pax); }
-    else if (++tries > 40) clearInterval(timer);   // ~20 sn sonra vazgec
+    const yolcuVar = document.querySelector('[name="Name[0]"]');
+    const telVar = document.querySelector('[name="GsmNumber"]');
+    if (yolcuVar && (telVar || tries > 12)) {        // telefon 6 sn'de gelmezse yine de doldur
+      clearInterval(timer);
+      fill(pax);
+      setTimeout(() => fill(pax, true), 2500);       // gec gelen alanlar icin 2. gecis
+      setTimeout(() => fill(pax, true), 6000);       // 3. gecis (yavas baglanti)
+    } else if (++tries > 40) clearInterval(timer);   // ~20 sn sonra vazgec
   }, 500);
 
   // --- Doldurma -------------------------------------------------------------
-  function fill(p) {
+  function fill(p, sessiz) {
     let n = 0;
+    const eksik = [];
     n += setText('[name="Name[0]"]', p.ad);
     n += setText('[name="SurName[0]"]', p.soyad);
     n += setText('[name="PassportNo[0]"]', p.pasaport);
@@ -60,11 +70,14 @@
     n += setSelect('[name="Gender[0]"]', genderWords(p.cinsiyet));
     // Ulke: secenek degeri ISO kodu (TM=Türkmenistan) — hem ada hem koda bak
     n += setSelect('[name="PassportCountry[0]"]', [p.uyruk, ulkeKodu(p.uyruk)]);
-    n += fillPhone(p.telefon);
+    const telSonuc = fillPhone(p.telefon);
+    n += telSonuc;
+    if (p.telefon && !telSonuc) eksik.push("telefon");
     // NOT: Bu formda "pasaport bitis tarihi" alani YOKTUR.
     //      ExpiredMonth/ExpiredYear KARTIN son kullanma tarihidir -> ASLA doldurulmaz.
-    toast(n ? `✅ ${n} alan dolduruldu — kartı sen gir, SATIN AL'a sen bas`
-            : "⚠️ Alanlar bulunamadı (site değişmiş olabilir)");
+    if (!sessiz || n)
+      toast(n ? `✅ ${n} alan dolduruldu${eksik.length ? " · eksik: " + eksik.join(", ") : ""}`
+              : "⚠️ Alan bulunamadı — 👤 Tekrar doldur'a bas");
     addButton(p);   // gerekirse tekrar doldur
   }
 
