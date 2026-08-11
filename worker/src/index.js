@@ -200,9 +200,16 @@ async function onCallback(env, cq) {
                              reply_markup: { inline_keyboard: [] } }),
     });
   }
-  // Kisa teyit (yetkili herkes gorsun: ayni bilet icin iki kisi ugrasmasin)
+  // Kisa teyit: KIMIN bileti oldugu net olsun (yetkili herkes gorur)
+  const satirlar = String((cq.message && cq.message.text) || "").split("\n");
+  const musteri = (satirlar[0] || "")
+    .replace(/^🎯\s*/, "").replace(/\s*için uygun bilet!?\s*$/i, "").trim();
+  const bilet = (satirlar[1] || "").startsWith("Kriter:") ? "" : (satirlar[1] || "").trim();
   await broadcastToAll(env,
-    `${ok === "1" ? "✅ <b>ALINDI</b>" : "❌ <b>Olmadı</b>"} — ${esc(kim)} · ${esc(damga)}`,
+    `${ok === "1" ? "✅ <b>ALINDI</b>" : "❌ <b>Olmadı</b>"}` +
+    (musteri ? ` — <b>${esc(musteri)}</b>` : "") +
+    (bilet ? `\n${esc(bilet)}` : "") +
+    `\n<i>${esc(kim)} · ${esc(damga)}</i>`,
     "HTML");
   // Tabloya yaz (GitHub tarafinda; ~1 dk)
   await dispatchWorkflow(env, { mark: `${satir}|${ymd}|${ok}`, report: "false" });
@@ -559,21 +566,31 @@ async function send(env, chatId, text, parseMode, replyMarkup) {
 }
 
 function helpText(isOwner) {
-  let t = "✈️ <b>ASB→İstanbul bilet botu</b>\n\n" +
-    "Bir <b>ay adı</b> yaz, o ayın biletlerini göndereyim:\n" +
-    "<code>ağustos</code> · <code>eylül</code> · <code>ekim</code> …\n\n" +
-    "Hepsi için: <b>tümü</b>\n\n" +
-    "<b>Sınıfa göre</b> (tüm aylar):\n" +
+  let t = "✈️ <b>ASB → İstanbul bilet botu</b>\n" +
+    "<i>Site 5 dakikada bir taranır; yeni bilet veya fiyat düşüşü olunca haber gelir.</i>\n\n" +
+    "<b>📋 Bilet listesi</b>\n" +
+    "<code>eylül</code> · <code>ekim</code> · <code>ağustos</code> — o ayın biletleri\n" +
+    "<code>tümü</code> — bütün aylar\n\n" +
+    "<b>🎫 Sınıfa göre</b>\n" +
     "<code>ekonomi</code> · <code>business</code> · <code>premium</code>\n" +
-    "İkisini birleştirebilirsin: <code>eylül ekonomi</code>\n\n" +
-    "🟢 yeni bilet / 🔻 fiyat düşüşü olunca ayrıca otomatik haber gelir.";
+    "<code>eylül ekonomi</code> — ay + sınıf birlikte\n\n" +
+    "<b>📊 Tabloyu okuma</b>\n" +
+    "<code>Sf</code>: E=Ekonomi, B=Business, P=Premium\n" +
+    "<code>Klt</code>: kalan koltuk (— = bilgi yok)\n" +
+    "Fiyatlar tek yön, USD.\n\n" +
+    "<b>🔔 Otomatik bildirimler</b>\n" +
+    "🟢 yeni bilet · 🔻 fiyat düşüşü · 📊 günlük durum";
   if (isOwner)
-    t += "\n\n<b>Yönetici komutları</b>\n" +
-      "<code>müşteri</code> — müşteri kriterleri + şu an uyan biletler\n" +
+    t += "\n\n<b>👤 Müşteri takibi</b>\n" +
+      "<code>müşteri</code> — kriterler + şu an uyan biletler\n" +
+      "Eşleşme çıkınca 🎯 bildirimi gelir; altındaki <b>✅ Aldım</b> / <b>❌ Olmadı</b> " +
+      "butonu sonucu Google Sheets'e yazar.\n" +
+      "Durum <b>Alındı</b> olan müşteri artık izlenmez (hücreyi silersen geri döner).\n\n" +
+      "<b>⚙️ Yönetim</b>\n" +
       "<code>/ayarlar</code> — bildirim ayarları\n" +
-      "<code>/business eylül</code> — Business yeni bilet ayı\n" +
-      "<code>/izinver &lt;id&gt; [ad]</code> — erişim ver\n" +
-      "<code>/izinal &lt;id&gt;</code> — erişimi al\n" +
-      "<code>/kullanicilar</code> — izinli listesi";
+      "<code>/business eylül</code> — Business yeni-bilet ayı\n" +
+      "<code>/izinver &lt;id&gt; [ad]</code> · <code>/izinal &lt;id&gt;</code> · " +
+      "<code>/kullanicilar</code>";
   return t;
 }
+
