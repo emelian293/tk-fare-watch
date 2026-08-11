@@ -1,5 +1,5 @@
 {
-  "collapse_warned": true,
+  "collapse_warned": false,
   "dates_has_any": {
     "2026-08-05": false,
     "2026-08-06": false,
@@ -138,7 +138,6 @@
     "2026-10-08|T5921|Business": 575.0,
     "2026-10-09|T5911|Business": 575.0,
     "2026-10-09|T5921|Business": 575.0,
-    "2026-10-09|T5921|Ekonomi": 390.0,
     "2026-10-10|T5985|Business": 575.0,
     "2026-10-11|T5901|Business": 575.0,
     "2026-10-11|T5921|Business": 575.0,
@@ -241,5 +240,5 @@
     "e517a5f000|2026-10-31|T5985|Business|575"
   ],
   "started": true,
-  "zero_streak": 4
+  "zero_streak": 0
 }
