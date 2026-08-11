@@ -187,8 +187,11 @@
     "2026-10-30|T5921|Ekonomi": 390.0,
     "2026-10-31|T5985|Business": 575.0
   },
-  "last_summary_date": "2026-08-10",
+  "last_summary_date": "2026-08-11",
   "misses": {},
+  "notified": [
+    "53e49f7403|2026-08-11|T5911|Business|575"
+  ],
   "started": true,
   "zero_streak": 0
 }
