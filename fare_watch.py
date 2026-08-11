@@ -481,7 +481,8 @@ def check_customers(dry=False):
     for c in people:
         hits = [(d, cb, inf) for d, cb, inf in board
                 if c["bas"] <= d <= c["bit"] and (not c["cabin"] or c["cabin"] == cb)]
-        broadcast(_customer_report_message(c, hits), parse_mode="HTML", dry=dry)
+        broadcast(_customer_report_message(c, hits), parse_mode="HTML", dry=dry,
+                  reply_markup=_satinal_butonlari(c, None))
     broadcast(f"✅ {len(people)} müşteri kontrol edildi.\n"
             "<i>Bundan sonra sadece YENİ çıkan biletlerde otomatik bildirim gelir.</i>",
             dry=dry, parse_mode="HTML")
@@ -554,26 +555,15 @@ def _norm_name(c):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
 
 
-def _pax_block(c):
-    """Yolcu bilgileri, dokun-kopyala (<code>) formatinda. KART BILGISI YOK."""
-    lines = ["<b>Yolcu bilgileri</b> — değere dokun, kopyalanır:"]
-    for lbl, val in (("Ad", c.get("ad")), ("Soyad", c.get("soyad")),
-                     ("Cinsiyet", c.get("cinsiyet")), ("Doğum", c.get("dogum")),
-                     ("Pasaport", c.get("pasaport")),
-                     ("Pas. bitiş", c.get("pasaport_bitis")),
-                     ("Uyruk", c.get("uyruk")), ("Telefon", c.get("telefon")),
-                     ("E-posta", c.get("eposta"))):
-        if val:
-            lines.append(f"{lbl} <code>{_esc(val)}</code>")
-    return lines
-
-
 _KART_NOTU = "💳 Kartı telefonun kendi otomatik doldurmasıyla gir; SATIN AL'a sen bas."
 
 
 def _satinal_butonlari(c, d):
-    """Bildirim altina 'Aldim / Olmadi' butonlari. callback_data 64 bayti asmamali."""
-    ymd = d.strftime("%Y%m%d")
+    """
+    Bildirim altina 'Aldim / Olmadi' butonlari (callback_data 64 bayti asmamali).
+    d=None -> rapordan isaretleme; hangi bilet oldugu belli degil (00000000).
+    """
+    ymd = d.strftime("%Y%m%d") if d else "00000000"
     return {"inline_keyboard": [[
         {"text": "✅ Aldım",  "callback_data": f"m|{c.get('satir', 0)}|{ymd}|1"},
         {"text": "❌ Olmadı", "callback_data": f"m|{c.get('satir', 0)}|{ymd}|0"}]]}
@@ -602,9 +592,8 @@ def _customer_message(c, d, cab, info):
         f"🎯 <b>{_esc((c.get('ad','') + ' ' + c.get('soyad','')).strip())}</b> için uygun bilet!",
         f"{_gun_baslik(d)} · {cab} · <b>{info['price']:.0f}$</b>"
         + (f" · son {seats} koltuk" if seats else ""),
-        "",
-    ] + _pax_block(c) + [
-        "", f'▶️ <a href="{pax_link(c, d)}">Bileti aç</a> → Seç → Devam Et', _KART_NOTU]
+        "", f'▶️ <a href="{pax_link(c, d)}">Bileti aç</a> → Seç → Devam Et',
+        "<i>Yolcu bilgileri sayfada otomatik dolar.</i>", _KART_NOTU]
     return "\n".join(lines)
 
 
@@ -617,8 +606,7 @@ def _customer_report_message(c, hits, limit=8):
     if not hits:
         return head + "\n\n📭 Şu an kriterine uyan bilet yok."
     ucuz = min(h[2]["price"] for h in hits)
-    lines = [head + f"\n🎫 <b>{len(hits)}</b> uygun bilet · en ucuz <b>{ucuz:.0f}$</b>", ""]
-    lines += _pax_block(c)
+    lines = [head + f"\n🎫 <b>{len(hits)}</b> uygun bilet · en ucuz <b>{ucuz:.0f}$</b>"]
     eksik = [k for k, v in (("pasaport", c.get("pasaport")), ("doğum", c.get("dogum")),
                             ("telefon", c.get("telefon")), ("e-posta", c.get("eposta")))
              if not v]
@@ -1064,10 +1052,12 @@ def main():
         try:
             satir, ymd, ok = args.mark.split("|")
             import customers as cust
-            tarih = datetime.strptime(ymd, "%Y%m%d").date()
+            if ymd == "00000000":
+                notu = "elle işaretlendi"
+            else:
+                notu = datetime.strptime(ymd, "%Y%m%d").strftime("%d.%m.%Y") + " ASB→IST"
             basarili, mesaj = cust.mark_purchase(
-                int(satir), ok == "1",
-                bilet_notu=f"{tarih.strftime('%d.%m.%Y')} ASB→IST", log=log)
+                int(satir), ok == "1", bilet_notu=notu, log=log)
             log(f"mark sonucu: {basarili} - {mesaj}")
             if not basarili:
                 tg_send(f"⚠️ Tabloya yazılamadı: {_esc(mesaj)}\n"
