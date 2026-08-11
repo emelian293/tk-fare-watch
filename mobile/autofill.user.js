@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         TK Fare-Watch — Yolcu Bilgisi Otomatik Doldur
 // @namespace    tk-fare-watch
-// @version      1.0
+// @version      1.1
 // @description  Telegram'daki bilet linkindeki yolcu bilgilerini ödeme formuna doldurur. KART bilgilerine DOKUNMAZ.
 // @match        https://turkmenistanairlinestr.com/*
 // @run-at       document-idle
 // @grant        none
+// @updateURL    https://raw.githubusercontent.com/emelian293/tk-fare-watch/main/mobile/autofill.user.js
+// @downloadURL  https://raw.githubusercontent.com/emelian293/tk-fare-watch/main/mobile/autofill.user.js
 // ==/UserScript==
 
 /*
