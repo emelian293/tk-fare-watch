@@ -1,5 +1,5 @@
 {
-  "collapse_warned": false,
+  "collapse_warned": true,
   "dates_has_any": {
     "2026-08-05": false,
     "2026-08-06": false,
@@ -238,5 +238,5 @@
     "e517a5f000|2026-10-31|T5985|Business|575"
   ],
   "started": true,
-  "zero_streak": 3
+  "zero_streak": 4
 }
