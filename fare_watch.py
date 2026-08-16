@@ -240,9 +240,20 @@ def parse_fares(html: str, query_date=None):
 
         key = f"{flight}|{cabin}"
         prev = result.get(key)
-        # Ayni ucus+sinif icin en dusuk fiyati tut (orn. promo eko vs esnek eko)
-        if prev is None or price < prev["price"]:
-            result[key] = {"price": price, "dep": dep, "arr": arr, "seats": seats}
+        # Site ayni ucus+sinif icin BIRDEN FAZLA ucret kovasi gosteriyor
+        # (orn. Ekonomi 390/444/509, Business 575/666 = "firsat" ve esnek tarifeler).
+        # Hepsini sakla; 'price' en ucuzu, 'prices' tum kovalar.
+        if prev is None:
+            result[key] = {"price": price, "dep": dep, "arr": arr,
+                           "seats": seats, "prices": [price]}
+        else:
+            if price not in prev["prices"]:
+                prev["prices"].append(price)
+            if price < prev["price"]:
+                prev.update({"price": price, "dep": dep or prev["dep"],
+                             "arr": arr or prev["arr"], "seats": seats})
+    for v in result.values():
+        v["prices"] = sorted(set(v["prices"]))
     if mismatch:
         log(f"  [{query_date}] tarih-uyumsuz {len(mismatch)} kutu ELENDI (hayalet oneri?): {mismatch[:5]}")
     return result
@@ -789,7 +800,8 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
         if status == "fail":
             continue
         prev_has = st["dates_has_any"].get(diso)
-        prev_fares = {k.split("|", 1)[1]: v
+        # Eski kayitlar tek float, yenileri liste -> ikisini de destekle
+        prev_fares = {k.split("|", 1)[1]: (v if isinstance(v, list) else [v])
                       for k, v in st["fares"].items() if k.startswith(diso + "|")}
 
         if status == "empty" or not fares:
@@ -825,11 +837,18 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
             new_for_customers.append((d, new_raw))
         for k, info in fares.items():
             _fl, cab = k.split("|")
-            if k in prev_fares and info["price"] < prev_fares[k] and cfg["price_drop"].get(cab, True):
-                price_drop.append((d, _fl, cab, prev_fares[k], info["price"], info))
+            if k not in prev_fares or not cfg["price_drop"].get(cab, True):
+                continue
+            eski = prev_fares[k]
+            # (a) en ucuz fiyat dustu  (b) ONCEDEN OLMAYAN ucret kovasi cikti ("firsat")
+            yeni_kovalar = [p for p in (info.get("prices") or [info["price"]]) if p not in eski]
+            if info["price"] < min(eski):
+                price_drop.append((d, _fl, cab, min(eski), info["price"], info))
+            elif yeni_kovalar and min(yeni_kovalar) < min(eski):
+                price_drop.append((d, _fl, cab, min(eski), min(yeni_kovalar), info))
         st["fares"] = {k: v for k, v in st["fares"].items() if not k.startswith(diso + "|")}
         for k, info in fares.items():
-            st["fares"][f"{diso}|{k}"] = info["price"]
+            st["fares"][f"{diso}|{k}"] = info.get("prices") or [info["price"]]
         st["dates_has_any"][diso] = True
 
     if not dry:
@@ -916,9 +935,9 @@ def _month_table(dates, results):
         rows = []
         for key, info in fares.items():
             _fl, cab = key.split("|")
-            rows.append((info.get("dep") or "--:--",
-                         cabin_letter(cab),
-                         info["price"], info.get("seats")))
+            for pf in (info.get("prices") or [info["price"]]):
+                rows.append((info.get("dep") or "--:--", cabin_letter(cab), pf,
+                             info.get("seats") if pf == info["price"] else None))
         rows.sort(key=lambda r: (r[0], r[1]))
         ds, gn = f"{d.day:02d} {AY_KISA[d.month]}", GUN_TBL[d.weekday()]
         for t, c, p, s in rows:
@@ -993,9 +1012,11 @@ def write_latest(results, st):
             arr = []
             for key, info in f.items():
                 fl, cab = key.split("|")
-                arr.append({"t": info.get("dep"), "c": cabin_letter(cab),
-                            "p": info["price"], "s": info.get("seats"), "fl": fl})
-            arr.sort(key=lambda x: (x["t"] or "", x["c"]))
+                for pfiyat in (info.get("prices") or [info["price"]]):
+                    arr.append({"t": info.get("dep"), "c": cabin_letter(cab),
+                                "p": pfiyat, "s": info.get("seats") if pfiyat == info["price"] else None,
+                                "fl": fl})
+            arr.sort(key=lambda x: (x["t"] or "", x["c"], x["p"]))
             board[diso] = arr
         elif s == "empty":
             board.pop(diso, None)   # satista yok -> gosterimden HEMEN cik

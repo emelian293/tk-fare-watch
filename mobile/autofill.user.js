@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TK Fare-Watch — Yolcu Bilgisi Otomatik Doldur
 // @namespace    tk-fare-watch
-// @version      1.3
+// @version      1.4
 // @description  Telegram'daki bilet linkindeki yolcu bilgilerini ödeme formuna doldurur. KART bilgilerine DOKUNMAZ.
 // @match        https://turkmenistanairlinestr.com/*
 // @run-at       document-idle
@@ -36,6 +36,44 @@
       toast("👤 " + [pax.ad, pax.soyad].filter(Boolean).join(" ") +
             " hazır — Seç → Devam Et yapınca form dolacak");
     } catch (e) { /* bozuk veri: sessizce gec */ }
+  }
+
+  // --- 1b) ARAMA ONARIMI ---------------------------------------------------
+  /* Telegram'dan gelen /SearchResult/... linki dogrudan acildiginda site bazen
+     kalkis yerini cozemiyor ("Nereden" bos) ve "0 Sonuc" gosteriyor. Bu durumda
+     arama formunu URL'deki bilgilerle doldurup yeniden aratiyoruz. */
+  if (/\/SearchResult\//i.test(location.pathname)) {
+    const par = location.pathname.split("/");
+    const i = par.findIndex(x => x.toLowerCase() === "searchresult");
+    const org = par[i + 1], dst = par[i + 2], tar = par[i + 3];
+    const bayrak = "tkfw_fix_" + location.pathname;
+    if (org && dst && tar && !sessionStorage.getItem(bayrak)) {
+      setTimeout(() => {
+        const bos = document.querySelectorAll(".result-box").length === 0;
+        const hdn = document.querySelector('[name="HdnOrigin"]');
+        if (!bos || !hdn) return;                   // sonuc varsa dokunma
+        sessionStorage.setItem(bayrak, "1");        // sonsuz donguyu engelle
+        aramayiOnar(org, dst, tar);
+      }, 1500);
+    }
+  }
+
+  function aramayiOnar(org, dst, tar) {
+    const ADI = { ASB: "Aşkabat", IST: "İstanbul" };
+    const q = n => document.querySelector(`[name="${n}"]`);
+    const setIf = (el, v) => { if (el) el.value = v; };
+    setIf(document.querySelector("#Origin"), ADI[org] || org);
+    setIf(document.querySelector("#Destination"), ADI[dst] || dst);
+    const ho = q("HdnOrigin"), hd = q("HdnDestination");
+    if (ho) { ho.value = org; ho.setAttribute("iscity", "false"); }
+    if (hd) { hd.value = dst; hd.setAttribute("iscity", "false"); }
+    setIf(document.getElementById("DepartureDate"), tar);
+    document.querySelectorAll('input[name="DepartureDate"]').forEach(e => { e.value = tar; });
+    const tt = document.querySelector('input[name="TripType"][value="1"]');
+    if (tt) tt.checked = true;
+    toast("🔄 Arama onarılıyor…");
+    const btn = document.getElementById("btn-search-flight");
+    if (btn) btn.click();
   }
 
   // --- 2) Odeme sayfasindaysa doldur ---------------------------------------
