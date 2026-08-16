@@ -856,13 +856,16 @@ def run_once(dry=False, limit=None, only_date=None, force_report=False):
         send_heartbeat(scan_found)   # "son kontrol" damgasi (veri degismese de tazelik belli olsun)
 
     # --- Bildirimler: yeni bilet + fiyat dususu -> YETKILI HERKESE (broadcast) ---
+    # NOT: Genel "yeni bilet / fiyat dustu" bildirimleri artik CLOUDFLARE WORKER'dan
+    # gidiyor (her dakika tarar, ~7 sn'de bildirir). Burada tekrar gondermiyoruz ki
+    # ayni bilet icin cift mesaj olmasin. Bu tarama tablo/rapor/musteri islerini yapar.
     if new_avail:
-        broadcast(_new_avail_message(new_avail), parse_mode="HTML", dry=dry)
+        log(f"{len(new_avail)} yeni tarih (genel bildirim Worker'da).")
     if new_for_customers:
         # Musteri kriteri kisiye ozeldir: kuresel sinif/ay filtresinden BAGIMSIZ calisir
         notify_customers(new_for_customers, st, dry=dry)   # yalnizca sahibe
     if price_drop:
-        broadcast(_price_drop_message(price_drop), parse_mode="HTML", dry=dry)
+        log(f"{len(price_drop)} fiyat dususu (genel bildirim Worker'da).")
     if not new_avail and not price_drop:
         log("Degisiklik yok, anlik bildirim yok.")
 

@@ -79,11 +79,175 @@ export default {
     return new Response("ok");
   },
 
-  // Cloudflare Cron (guvenilir): GitHub tarama workflow'unu tetikler
+  /* Cron her DAKIKA calisir:
+       - hizliTara: dogrudan siteyi tarar, yeni/ucuzlayan bileti ANINDA bildirir
+       - triggerScan: GitHub tam taramasi (tablo, musteri eslestirme, Sheets) 5 dk'da bir */
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(triggerScan(env));
+    ctx.waitUntil((async () => {
+      await hizliTara(env).catch(() => {});
+      if (new Date().getUTCMinutes() % 5 === 0) await triggerScan(env).catch(() => {});
+    })());
   },
 };
+
+
+/* ============================================================
+   HIZLI TARAYICI — biletler 2-3 dk'da tukendigi icin bildirim
+   GitHub'i beklemeden dogrudan Worker'dan gider.
+   Cron her dakika calisir; her calismada DILIM kadar tarih taranir
+   (Cloudflare ucretsiz plan: calisma basina 50 alt-istek siniri).
+   Tum aralik ~2 dakikada bir taranmis olur; bildirim ~7 saniyede ulasir.
+   ============================================================ */
+const IZLEME_BAS = "2026-08-01";
+const IZLEME_BIT = "2026-10-31";
+const DILIM = 44;                       // her dakika taranacak tarih sayisi
+const ES_ZAMANLI = 8;                   // ayni anda kac istek
+
+function izlenenTarihler() {
+  const bugun = new Date(); bugun.setUTCHours(0, 0, 0, 0);
+  let d = new Date(IZLEME_BAS + "T00:00:00Z");
+  if (bugun > d) d = bugun;
+  const son = new Date(IZLEME_BIT + "T00:00:00Z");
+  const out = [];
+  for (; d <= son; d = new Date(d.getTime() + 86400000))
+    out.push(d.toISOString().slice(0, 10));
+  return out;
+}
+
+function isoToSite(iso) {                // 2026-10-25 -> 25.10.2026
+  const [y, m, g] = iso.split("-");
+  return `${g}.${m}.${y}`;
+}
+
+const AY_ISIM = { ocak:1, "şubat":2, mart:3, nisan:4, "mayıs":5, haziran:6, temmuz:7,
+                  "ağustos":8, "eylül":9, ekim:10, "kasım":11, "aralık":12 };
+
+/* Bir tarihin sayfasini cek ve tarifeleri cikar.
+   Donus: {durum:"ok"|"empty"|"fail", tarifeler:{ "T5921|E": [390,444] }} */
+async function tarihiTara(iso) {
+  const url = `https://turkmenistanairlinestr.com/tr-TR/SearchResult/ASB/IST/${isoToSite(iso)}/-/false/false/1/0/0/1`;
+  let html;
+  try {
+    const r = await fetch(url, { headers: {
+      "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36",
+      "Accept-Language": "tr-TR,tr;q=0.9",
+      "Accept": "text/html,application/xhtml+xml,*/*;q=0.8" } });
+    if (r.status !== 200) return { durum: "fail" };
+    html = await r.text();
+  } catch (_) { return { durum: "fail" }; }
+  if (!/Sıralama|Toplam/.test(html)) return { durum: "fail" };   // yonlendirme/engel
+
+  const tarifeler = {};
+  const bloklar = html.split('class="result-box"').slice(1);
+  const [yil, ay, gun] = iso.split("-").map(Number);
+  for (const ham of bloklar) {
+    const t = ham.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+    const fl = (t.match(/T5\d{3,4}/) || [])[0];
+    if (!fl) continue;
+    // TARIH DOGRULAMA: kutunun kalkis tarihi sorgulanan tarihle ayni olmali
+    const md = t.match(/(\d{1,2})\s+(Ocak|Şubat|Mart|Nisan|Mayıs|Haziran|Temmuz|Ağustos|Eylül|Ekim|Kasım|Aralık)/);
+    if (md) {
+      const bg = parseInt(md[1], 10), ba = AY_ISIM[md[2].toLocaleLowerCase("tr")];
+      if (bg !== gun || ba !== ay) continue;        // hayalet oneri -> ele
+    }
+    const cm = t.match(/\b(Business|Ekonomi|Economy|Premium)\b/);
+    if (!cm) continue;
+    const sinif = /business/i.test(cm[1]) ? "B" : /premium/i.test(cm[1]) ? "P" : "E";
+    const pm = ham.match(/data-defaultprice="([\d.]+,\d{2})/) || t.match(/([\d.]+,\d{2})/);
+    if (!pm) continue;
+    const fiyat = parseFloat(pm[1].replace(/\./g, "").replace(",", "."));
+    if (!fiyat) continue;
+    const saat = (t.match(/ASB\s*(\d{2}:\d{2})/) || t.match(/(\d{2}:\d{2})/) || [])[1] || "";
+    const koltuk = (t.match(/(\d+)\s*Koltuk/) || [])[1] || null;
+    const k = `${fl}|${sinif}`;
+    (tarifeler[k] ||= { f: [], s: saat, k: koltuk });
+    if (!tarifeler[k].f.includes(fiyat)) tarifeler[k].f.push(fiyat);
+  }
+  for (const v of Object.values(tarifeler)) v.f.sort((a, b) => a - b);
+  return Object.keys(tarifeler).length ? { durum: "ok", tarifeler } : { durum: "empty" };
+}
+
+const SINIF_ADI = { E: "Ekonomi", B: "Business", P: "Premium" };
+const GUN_UZUN = ["Pazar","Pazartesi","Salı","Çarşamba","Perşembe","Cuma","Cumartesi"];
+const AY_UZUN = ["Ocak","Şubat","Mart","Nisan","Mayıs","Haziran","Temmuz","Ağustos","Eylül","Ekim","Kasım","Aralık"];
+
+function gunBaslik(iso) {
+  const d = new Date(iso + "T00:00:00Z");
+  return `${d.getUTCDate()} ${AY_UZUN[d.getUTCMonth()]} ${GUN_UZUN[d.getUTCDay()]}`;
+}
+
+async function hizliTara(env) {
+  if (!env.ACCESS) return;
+  const tumu = izlenenTarihler();
+  // Donen dilim: her calismada bir sonraki parca
+  const imleç = parseInt((await env.ACCESS.get("fast:cursor")) || "0", 10) || 0;
+  const dilim = [];
+  for (let i = 0; i < Math.min(DILIM, tumu.length); i++)
+    dilim.push(tumu[(imleç + i) % tumu.length]);
+  await env.ACCESS.put("fast:cursor", String((imleç + DILIM) % tumu.length));
+
+  let board = {};
+  try { board = JSON.parse((await env.ACCESS.get("fast:board")) || "{}"); } catch (_) {}
+
+  const sonuc = {};
+  for (let i = 0; i < dilim.length; i += ES_ZAMANLI)
+    await Promise.all(dilim.slice(i, i + ES_ZAMANLI).map(async (iso) => {
+      sonuc[iso] = await tarihiTara(iso);
+    }));
+
+  const yeni = [];            // [{iso, sinif, fiyat, saat, koltuk, tur}]
+  let degisti = false;
+  for (const iso of dilim) {
+    const r = sonuc[iso];
+    if (!r || r.durum === "fail") continue;              // dogrulanamadi -> dokunma
+    const onceki = board[iso] || {};
+    if (r.durum === "empty") {
+      if (Object.keys(onceki).length) { delete board[iso]; degisti = true; }
+      continue;
+    }
+    for (const [k, v] of Object.entries(r.tarifeler)) {
+      const eski = (onceki[k] && onceki[k].f) || null;
+      const enUcuz = v.f[0];
+      if (!eski) {
+        yeni.push({ iso, k, fiyat: enUcuz, saat: v.s, koltuk: v.k, tur: "yeni" });
+      } else if (enUcuz < Math.min(...eski)) {
+        yeni.push({ iso, k, fiyat: enUcuz, saat: v.s, koltuk: v.k, tur: "ucuz",
+                    eskiFiyat: Math.min(...eski) });
+      }
+    }
+    if (JSON.stringify(onceki) !== JSON.stringify(r.tarifeler)) {
+      board[iso] = r.tarifeler; degisti = true;
+    }
+  }
+
+  if (degisti) await env.ACCESS.put("fast:board", JSON.stringify(board));
+  await env.ACCESS.put("sys:lastscan",
+    JSON.stringify({ t: Date.now(), found: Object.keys(board).length }));
+
+  if (!yeni.length) return;
+  // Ilk calismada board bos oldugu icin her sey "yeni" gorunur -> sel gonderme
+  if (Object.keys(board).length && !(await env.ACCESS.get("fast:started"))) {
+    await env.ACCESS.put("fast:started", "1");
+    return;
+  }
+  yeni.sort((a, b) => a.fiyat - b.fiyat);
+  const satir = (y) => {
+    const [fl, sf] = y.k.split("|");
+    const klt = y.koltuk ? ` · son ${y.koltuk} koltuk` : "";
+    const ok = y.tur === "ucuz" ? ` (${y.eskiFiyat}$ → )` : "";
+    return `${y.saat} · <b>${SINIF_ADI[sf]}</b> · <b>${y.fiyat}$</b>${klt}${ok}`;
+  };
+  const gruplu = {};
+  for (const y of yeni.slice(0, 12)) (gruplu[y.iso] ||= []).push(y);
+  const parcalar = ["⚡ <b>ANLIK BİLET</b> — ASB→İstanbul"];
+  for (const iso of Object.keys(gruplu).sort()) {
+    parcalar.push(`\n<b>${gunBaslik(iso)}</b>`);
+    for (const y of gruplu[iso]) parcalar.push("  " + satir(y));
+    parcalar.push(`  <a href="https://turkmenistanairlinestr.com/tr-TR/SearchResult/ASB/IST/${isoToSite(iso)}/-/false/false/1/0/0/1">Bileti aç</a>`);
+  }
+  await broadcastToAll(env, parcalar.join("\n"), "HTML");
+}
+
 
 async function triggerCheck(env) {
   /* Musteri raporunu GitHub'da uretip Telegram'a yollatir.

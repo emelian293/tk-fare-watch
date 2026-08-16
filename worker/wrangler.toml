@@ -9,7 +9,7 @@ id = "59f99aa5c20b4a178d9a1ed72b80de34"
 
 # Guvenilir zamanlama: her 5 dakikada GitHub taramasini tetikle
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["* * * * *"]   # her dakika: hizli tarama (GitHub 5 dk'da bir tetiklenir)
 
 # Gizli olmayan degiskenler burada durabilir (istege bagli).
 # DATA_URL varsayilani kod icinde; degistirmek istersen ac:

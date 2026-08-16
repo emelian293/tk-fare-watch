@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TK Fare-Watch — Yolcu Bilgisi Otomatik Doldur
 // @namespace    tk-fare-watch
-// @version      1.4
+// @version      1.5
 // @description  Telegram'daki bilet linkindeki yolcu bilgilerini ödeme formuna doldurur. KART bilgilerine DOKUNMAZ.
 // @match        https://turkmenistanairlinestr.com/*
 // @run-at       document-idle
@@ -47,18 +47,27 @@
     const i = par.findIndex(x => x.toLowerCase() === "searchresult");
     const org = par[i + 1], dst = par[i + 2], tar = par[i + 3];
     const bayrak = "tkfw_fix_" + location.pathname;
-    if (org && dst && tar && !sessionStorage.getItem(bayrak)) {
+    if (org && dst && tar) {
       setTimeout(() => {
-        const bos = document.querySelectorAll(".result-box").length === 0;
         const hdn = document.querySelector('[name="HdnOrigin"]');
-        if (!bos || !hdn) return;                   // sonuc varsa dokunma
-        sessionStorage.setItem(bayrak, "1");        // sonsuz donguyu engelle
-        aramayiOnar(org, dst, tar);
+        if (!hdn) return;
+        // 1) Arama kutusundaki "Nereden" site tarafindan bos birakiliyor ->
+        //    sonuc olsa da olmasa da URL'deki bilgiyle DOLDUR (gorsel tutarlilik +
+        //    kullanici "Uçuş Ara"ya basarsa dogru arama yapilsin).
+        alanlariDoldur(org, dst, tar);
+        // 2) Hic sonuc yoksa aramayi yeniden calistir (link bozuk gelmis demektir)
+        const bos = document.querySelectorAll(".result-box").length === 0;
+        if (bos && !sessionStorage.getItem(bayrak)) {
+          sessionStorage.setItem(bayrak, "1");      // sonsuz donguyu engelle
+          toast("🔄 Arama onarılıyor…");
+          const btn = document.getElementById("btn-search-flight");
+          if (btn) btn.click();
+        }
       }, 1500);
     }
   }
 
-  function aramayiOnar(org, dst, tar) {
+  function alanlariDoldur(org, dst, tar) {
     const ADI = { ASB: "Aşkabat", IST: "İstanbul" };
     const q = n => document.querySelector(`[name="${n}"]`);
     const setIf = (el, v) => { if (el) el.value = v; };
@@ -71,9 +80,6 @@
     document.querySelectorAll('input[name="DepartureDate"]').forEach(e => { e.value = tar; });
     const tt = document.querySelector('input[name="TripType"][value="1"]');
     if (tt) tt.checked = true;
-    toast("🔄 Arama onarılıyor…");
-    const btn = document.getElementById("btn-search-flight");
-    if (btn) btn.click();
   }
 
   // --- 2) Odeme sayfasindaysa doldur ---------------------------------------
